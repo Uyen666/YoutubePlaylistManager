@@ -1472,7 +1472,14 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
     }
 
     const folderId = createData.data.id || createData.data.media_id;
-    const userMid = createData.data.mid || '';
+    let userMid = createData.data.mid || '';
+    if (!userMid) {
+      const midMatch = document.cookie.match(/(?:^|;\s*)DedeUserID=([^;]+)/);
+      if (midMatch) userMid = midMatch[1];
+    }
+    if (!userMid && window.__INITIAL_STATE__ && window.__INITIAL_STATE__.mid) {
+      userMid = String(window.__INITIAL_STATE__.mid);
+    }
 
     // 3. 高精度 BVID ➔ AID (av 號) 轉換器 (支援各類 URL、字串、物件)
     const BILI_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
@@ -1519,51 +1526,109 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
       }
     }
 
-    console.log(`[Bilibili:NativeEngine] Folder created fid=${folderId}, adding ${aids.length} videos (AIDs: ${aids.join(',')})...`);
-
-    if (aids.length === 0) {
-      console.warn('[Bilibili:NativeEngine] No valid video AIDs extracted from:', videoIds);
+    // 探測當前來源收藏夾 ID
+    function detectSourceMediaId() {
+      const url = window.location.href;
+      const fidM = url.match(/[?&]fid=(\d+)/);
+      if (fidM) return fidM[1];
+      const mlM = url.match(/\/ml(\d+)/i);
+      if (mlM) return mlM[1];
+      const curItem = document.querySelector('.fav-item.cur, .fav-item.active, li.cur, .cur-list');
+      if (curItem) {
+        const df = curItem.getAttribute('data-fid') || curItem.getAttribute('fid');
+        if (df && /^\d+$/.test(df)) return df;
+      }
+      return null;
     }
 
-    // 4. 批次將影片加入新收藏夾 (使用高相容性的 deal 接口進行微批次平行收納)
-    let addedSuccessCount = 0;
-    const concurrency = 4;
-    for (let i = 0; i < aids.length; i += concurrency) {
-      const chunk = aids.slice(i, i + concurrency);
-      await Promise.all(chunk.map(async (singleAid) => {
-        try {
-          const dealParams = new URLSearchParams();
-          dealParams.append('rid', String(singleAid));
-          dealParams.append('type', '2');
-          dealParams.append('add_media_ids', String(folderId));
-          dealParams.append('del_media_ids', '');
-          dealParams.append('csrf', csrf);
+    const srcMediaId = detectSourceMediaId();
+    console.log(`[Bilibili:NativeEngine] Target Folder ID: ${folderId}, Source Media ID: ${srcMediaId}, User Mid: ${userMid}, Total AIDs: ${aids.length}`);
 
-          const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+    let addedSuccessCount = 0;
+
+    // 4.1 優先策略：使用 B站官方收藏夾複製 API (x/v3/fav/resource/copy)
+    if (srcMediaId && aids.length > 0) {
+      const copyBatchSize = 50;
+      for (let i = 0; i < aids.length; i += copyBatchSize) {
+        const chunk = aids.slice(i, i + copyBatchSize);
+        try {
+          const copyParams = new URLSearchParams();
+          copyParams.append('src_media_id', String(srcMediaId));
+          copyParams.append('tar_media_id', String(folderId));
+          if (userMid) copyParams.append('mid', String(userMid));
+          copyParams.append('resources', chunk.map(aid => `${aid}:2`).join(','));
+          copyParams.append('platform', 'web');
+          copyParams.append('csrf', csrf);
+
+          const copyRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/copy', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/x-www-form-urlencoded',
               'Accept': 'application/json, text/plain, */*'
             },
             credentials: 'include',
-            body: dealParams.toString()
+            body: copyParams.toString()
           });
 
-          const singleData = await singleRes.json();
-          if (singleData.code === 0) {
-            addedSuccessCount++;
-          } else {
-            console.warn(`[Bilibili:NativeEngine] Failed adding aid ${singleAid}:`, singleData);
+          const copyData = await copyRes.json();
+          console.log('[Bilibili:NativeEngine] copy response:', copyData);
+          if (copyData.code === 0) {
+            addedSuccessCount += chunk.length;
           }
         } catch (err) {
-          console.warn(`[Bilibili:NativeEngine] Network error adding aid ${singleAid}:`, err);
+          console.warn('[Bilibili:NativeEngine] copy error:', err);
         }
-      }));
 
-      // 輕微間隔防風控
-      if (i + concurrency < aids.length) {
-        await new Promise(r => setTimeout(r, 120));
+        if (i + copyBatchSize < aids.length) {
+          await new Promise(r => setTimeout(r, 150));
+        }
       }
+    }
+
+    // 4.2 備援策略：若 copy 未涵蓋所有影片，使用 deal 單筆微批次加入
+    if (addedSuccessCount < aids.length) {
+      const remainingAids = (addedSuccessCount === 0) ? aids : aids.slice(addedSuccessCount);
+      console.log(`[Bilibili:NativeEngine] Running deal API for ${remainingAids.length} videos...`);
+      const concurrency = 4;
+      for (let i = 0; i < remainingAids.length; i += concurrency) {
+        const chunk = remainingAids.slice(i, i + concurrency);
+        await Promise.all(chunk.map(async (singleAid) => {
+          try {
+            const dealParams = new URLSearchParams();
+            dealParams.append('rid', String(singleAid));
+            dealParams.append('type', '2');
+            dealParams.append('add_media_ids', String(folderId));
+            dealParams.append('del_media_ids', '');
+            dealParams.append('csrf', csrf);
+
+            const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json, text/plain, */*'
+              },
+              credentials: 'include',
+              body: dealParams.toString()
+            });
+
+            const singleData = await singleRes.json();
+            console.log(`[Bilibili:NativeEngine] deal aid=${singleAid}:`, singleData);
+            if (singleData.code === 0 || singleData.code === 11201) {
+              addedSuccessCount++;
+            }
+          } catch (err) {
+            console.warn(`[Bilibili:NativeEngine] deal error for aid ${singleAid}:`, err);
+          }
+        }));
+
+        if (i + concurrency < remainingAids.length) {
+          await new Promise(r => setTimeout(r, 120));
+        }
+      }
+    }
+
+    if (aids.length > 0 && addedSuccessCount === 0) {
+      return { success: false, error: '收藏夾已建立，但影片加入過程受 B 站風控或權限限制，請手動確認。' };
     }
 
     const playlistUrl = userMid

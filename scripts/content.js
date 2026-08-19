@@ -730,7 +730,11 @@
         }
 
         const folderId = createData.data.id || createData.data.media_id;
-        const userMid = createData.data.mid || '';
+        let userMid = createData.data.mid || '';
+        if (!userMid) {
+          const midMatch = document.cookie.match(/(?:^|;\s*)DedeUserID=([^;]+)/);
+          if (midMatch) userMid = midMatch[1];
+        }
 
         const BILI_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
         const BILI_TR = {};
@@ -772,46 +776,90 @@
           }
         }
 
+        const srcMediaId = this.detectMediaId ? this.detectMediaId() : null;
         let addedSuccessCount = 0;
-        const concurrency = 4;
-        for (let i = 0; i < aids.length; i += concurrency) {
-          const chunk = aids.slice(i, i + concurrency);
-          await Promise.all(chunk.map(async (singleAid) => {
-            try {
-              const dealParams = new URLSearchParams();
-              dealParams.append('rid', String(singleAid));
-              dealParams.append('type', '2');
-              dealParams.append('add_media_ids', String(folderId));
-              dealParams.append('del_media_ids', '');
-              dealParams.append('csrf', csrf);
 
-              const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+        if (srcMediaId && aids.length > 0) {
+          const copyBatchSize = 50;
+          for (let i = 0; i < aids.length; i += copyBatchSize) {
+            const chunk = aids.slice(i, i + copyBatchSize);
+            try {
+              const copyParams = new URLSearchParams();
+              copyParams.append('src_media_id', String(srcMediaId));
+              copyParams.append('tar_media_id', String(folderId));
+              if (userMid) copyParams.append('mid', String(userMid));
+              copyParams.append('resources', chunk.map(aid => `${aid}:2`).join(','));
+              copyParams.append('platform', 'web');
+              copyParams.append('csrf', csrf);
+
+              const copyRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/copy', {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
                   'Accept': 'application/json, text/plain, */*'
                 },
                 credentials: 'include',
-                body: dealParams.toString()
+                body: copyParams.toString()
               });
-              const singleData = await singleRes.json();
-              if (singleData.code === 0) {
-                addedSuccessCount++;
-              } else {
-                console.warn(`[BilibiliAdapter] Failed adding aid ${singleAid}:`, singleData);
+
+              const copyData = await copyRes.json();
+              if (copyData.code === 0) {
+                addedSuccessCount += chunk.length;
               }
-            } catch (err) {
-              console.warn(`[BilibiliAdapter] Network error adding aid ${singleAid}:`, err);
+            } catch (_) {}
+
+            if (onProgress) {
+              onProgress(Math.min(i + copyBatchSize, aids.length), aids.length, categoryName);
             }
-          }));
 
-          if (onProgress) {
-            onProgress(Math.min(i + concurrency, aids.length), aids.length, categoryName);
+            if (i + copyBatchSize < aids.length) {
+              await sleep(150);
+            }
           }
+        }
 
-          if (i + concurrency < aids.length) {
-            await sleep(120);
+        if (addedSuccessCount < aids.length) {
+          const remainingAids = (addedSuccessCount === 0) ? aids : aids.slice(addedSuccessCount);
+          const concurrency = 4;
+          for (let i = 0; i < remainingAids.length; i += concurrency) {
+            const chunk = remainingAids.slice(i, i + concurrency);
+            await Promise.all(chunk.map(async (singleAid) => {
+              try {
+                const dealParams = new URLSearchParams();
+                dealParams.append('rid', String(singleAid));
+                dealParams.append('type', '2');
+                dealParams.append('add_media_ids', String(folderId));
+                dealParams.append('del_media_ids', '');
+                dealParams.append('csrf', csrf);
+
+                const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json, text/plain, */*'
+                  },
+                  credentials: 'include',
+                  body: dealParams.toString()
+                });
+                const singleData = await singleRes.json();
+                if (singleData.code === 0 || singleData.code === 11201) {
+                  addedSuccessCount++;
+                }
+              } catch (_) {}
+            }));
+
+            if (onProgress) {
+              onProgress(Math.min(addedSuccessCount, aids.length), aids.length, categoryName);
+            }
+
+            if (i + concurrency < remainingAids.length) {
+              await sleep(120);
+            }
           }
+        }
+
+        if (aids.length > 0 && addedSuccessCount === 0) {
+          return { success: false, error: '收藏夾已建立，但影片加入過程受 B 站風控或權限限制，請手動確認。' };
         }
 
         const playlistUrl = userMid
