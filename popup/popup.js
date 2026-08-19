@@ -190,7 +190,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return new Promise((resolve) => {
       chrome.storage.local.get(['provider', 'customModel', 'apiKey', 'categories', 'maxItems', 'privacy'], (result) => {
         let provider = result.provider || 'gemini-3.6-flash';
-        if (provider === 'gemini-2.0-flash') {
+        if (provider === 'gemini-2.0-flash' || provider === 'gemini-2.5-flash') {
           provider = 'gemini-3.6-flash';
           chrome.storage.local.set({ provider: 'gemini-3.6-flash' });
         }

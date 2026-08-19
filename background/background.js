@@ -143,7 +143,10 @@ async function handleStartAnalysis(params) {
   isTaskRunning = true;
   currentCancelToken = false;
 
-  const effectiveModel = provider === 'custom' ? (customModel || 'gemini-3.6-flash') : provider;
+  let effectiveModel = provider === 'custom' ? (customModel || 'gemini-3.6-flash') : provider;
+  if (effectiveModel === 'gemini-2.5-flash' || effectiveModel === 'gemini-2.0-flash') {
+    effectiveModel = 'gemini-3.6-flash';
+  }
 
   await updateTaskState({
     status: 'scraping',
