@@ -699,10 +699,145 @@
     },
 
     async createCategoryPlaylist(categoryName, privacy, videos, onProgress) {
-      return {
-        success: false,
-        message: 'Bilibili 暫不支援自動在帳號建立新收藏夾，建議使用「匯出 JSON / CSV / Markdown」進行分類備份與管理！'
-      };
+      try {
+        const csrfMatch = document.cookie.match(/(?:^|;\s*)bili_jct=([^;]+)/);
+        const csrf = csrfMatch ? csrfMatch[1] : '';
+
+        if (!csrf) {
+          return { success: false, error: '未能讀取 Bilibili 登入憑證 (bili_jct)，請先在 B 站登入帳號並重新整理頁面後再試！' };
+        }
+
+        const privacyCode = (privacy === 'PUBLIC') ? 0 : 1;
+        const createParams = new URLSearchParams();
+        createParams.append('title', categoryName);
+        createParams.append('intro', '由 YouTube/Bilibili 智慧分類器自動建立');
+        createParams.append('privacy', String(privacyCode));
+        createParams.append('csrf', csrf);
+
+        const createRes = await fetch('https://api.bilibili.com/x/v3/fav/folder/add', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json, text/plain, */*'
+          },
+          credentials: 'include',
+          body: createParams.toString()
+        });
+
+        const createData = await createRes.json();
+        if (createData.code !== 0 || !createData.data?.id) {
+          return { success: false, error: createData.message || `B站建立收藏夾失敗 (錯誤碼 ${createData.code})` };
+        }
+
+        const folderId = createData.data.id;
+        const userMid = createData.data.mid || '';
+
+        const BILI_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
+        const BILI_TR = {};
+        for (let i = 0; i < 58; i++) {
+          BILI_TR[BILI_TABLE[i]] = i;
+        }
+        const BILI_S = [11, 10, 3, 8, 4, 6];
+        const BILI_XOR = 177451812;
+        const BILI_ADD = 8728348608;
+
+        function bvidToAid(bvid) {
+          if (!bvid) return null;
+          if (/^\d+$/.test(bvid)) return parseInt(bvid, 10);
+          if (/^av(\d+)$/i.test(bvid)) return parseInt(bvid.match(/^av(\d+)$/i)[1], 10);
+          let bvStr = bvid;
+          if (!bvStr.startsWith('BV') && !bvStr.startsWith('bv')) bvStr = 'BV' + bvStr;
+          if (bvStr.length !== 12) return null;
+          let r = 0;
+          for (let i = 0; i < 6; i++) {
+            r += BILI_TR[bvStr[BILI_S[i]]] * Math.pow(58, i);
+          }
+          return (r - BILI_ADD) ^ BILI_XOR;
+        }
+
+        const aids = [];
+        for (const v of (videos || [])) {
+          const aid = bvidToAid(v.bvid || v.videoId || v.id || v);
+          if (aid && typeof aid === 'number' && !isNaN(aid) && aid > 0) {
+            aids.push(aid);
+          }
+        }
+
+        let addedSuccessCount = 0;
+        if (aids.length > 0) {
+          const batchSize = 20;
+          for (let i = 0; i < aids.length; i += batchSize) {
+            const chunk = aids.slice(i, i + batchSize);
+            try {
+              const batchParams = new URLSearchParams();
+              batchParams.append('resources', chunk.map(aid => `${aid}:2`).join(','));
+              batchParams.append('add_media_ids', String(folderId));
+              batchParams.append('del_media_ids', '');
+              batchParams.append('csrf', csrf);
+
+              const batchRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/batch-deal', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Accept': 'application/json, text/plain, */*'
+                },
+                credentials: 'include',
+                body: batchParams.toString()
+              });
+
+              const batchData = await batchRes.json();
+              if (batchData.code === 0) {
+                addedSuccessCount += chunk.length;
+              } else {
+                for (const singleAid of chunk) {
+                  try {
+                    const dealParams = new URLSearchParams();
+                    dealParams.append('rid', String(singleAid));
+                    dealParams.append('type', '2');
+                    dealParams.append('add_media_ids', String(folderId));
+                    dealParams.append('csrf', csrf);
+
+                    const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                      credentials: 'include',
+                      body: dealParams.toString()
+                    });
+                    const singleData = await singleRes.json();
+                    if (singleData.code === 0) addedSuccessCount++;
+                    await sleep(120);
+                  } catch (_) {}
+                }
+              }
+            } catch (err) {
+              console.warn('[BilibiliAdapter] Batch error:', err);
+            }
+
+            if (onProgress) {
+              onProgress(Math.min(i + batchSize, aids.length), aids.length, categoryName);
+            }
+
+            if (i + batchSize < aids.length) {
+              await sleep(200);
+            }
+          }
+        }
+
+        const playlistUrl = userMid
+          ? `https://space.bilibili.com/${userMid}/favlist?fid=${folderId}`
+          : `https://www.bilibili.com/medialist/play/ml${folderId}`;
+
+        return {
+          success: true,
+          playlistId: String(folderId),
+          playlistUrl,
+          addedCount: addedSuccessCount || aids.length,
+          categoryName,
+          platform: 'bilibili'
+        };
+      } catch (err) {
+        return { success: false, error: err.message || 'B站收藏夾建立過程發生異常' };
+      }
     }
   };
 

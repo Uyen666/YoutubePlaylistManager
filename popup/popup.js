@@ -655,6 +655,14 @@ document.addEventListener('DOMContentLoaded', () => {
     card.className = 'category-card';
     card.setAttribute('data-category', categoryName);
 
+    // 辨識當前平台 (Bilibili 收藏夾 vs YouTube 播放清單)
+    const isBilibili = (currentDetectedPlatform === 'bilibili') ||
+                       (currentCachedTask?.platform === 'bilibili') ||
+                       (currentTab?.url && currentTab.url.includes('bilibili.com'));
+    const platformLabel = isBilibili ? 'Bilibili' : 'YouTube';
+    const actionLabel = isBilibili ? '建立收藏' : '建立清單';
+    const openActionLabel = isBilibili ? '開啟收藏' : '開啟清單';
+
     const header = document.createElement('div');
     header.className = 'category-header';
     header.innerHTML = `
@@ -664,21 +672,21 @@ document.addEventListener('DOMContentLoaded', () => {
         <span class="category-badge">${videos.length} 部</span>
       </div>
       <div class="category-header-right">
-        <button class="btn-create-playlist" title="在 YouTube 自動建立此分類播放清單並加入影片">
-          <span>➕ 建立清單</span>
+        <button class="btn-create-playlist" title="在 ${platformLabel} 自動建立此分類${isBilibili ? '收藏夾' : '播放清單'}並加入影片">
+          <span>➕ ${actionLabel}</span>
         </button>
         <span class="category-chevron">▶</span>
       </div>
     `;
 
-    // 綁定「在 YouTube 建立此清單」點擊事件 (採用原生 Innertube API 引擎，秒速完成零失敗)
+    // 綁定「建立此清單/收藏」點擊事件 (YouTube: Innertube 原生引擎; Bilibili: FavFolder API 原生引擎)
     const btnCreate = header.querySelector('.btn-create-playlist');
     let createdPlaylistUrl = null;
 
     btnCreate.addEventListener('click', async (e) => {
       e.stopPropagation(); // 防止觸發手風琴開闔
 
-      // 若已建立過，點擊直接在新分頁開啟該播放清單
+      // 若已建立過，點擊直接在新分頁開啟該播放清單/收藏夾
       if (createdPlaylistUrl) {
         chrome.tabs.create({ url: createdPlaylistUrl });
         return;
@@ -687,24 +695,26 @@ document.addEventListener('DOMContentLoaded', () => {
       if (btnCreate.disabled) return;
 
       if (!currentTab || !currentTab.id) {
-        showToast('⚠️ 未能取得當前 YouTube 分頁');
+        showToast(`⚠️ 未能取得當前 ${platformLabel} 分頁`);
         return;
       }
 
       btnCreate.disabled = true;
       btnCreate.classList.add('loading');
       btnCreate.innerHTML = `<span>⏳ 建立中 (${videos.length} 部)...</span>`;
-      showToast(`🚀 開始在 YouTube 建立「${categoryName}」播放清單...`);
+      showToast(`🚀 開始在 ${platformLabel} 建立「${categoryName}」...`);
 
       try {
         const privacy = playlistPrivacySelect ? playlistPrivacySelect.value : 'PRIVATE';
-        const videoIds = videos.map(v => v.videoId).filter(Boolean);
+        const videoIds = videos.map(v => v.videoId || v.bvid || v.id).filter(Boolean);
 
-        // 使用 Chrome Scripting MAIN world 於 YouTube 頁面原生執行建立
+        const targetFunc = isBilibili ? nativeCreateBilibiliFavFolderInPage : nativeCreatePlaylistInPage;
+
+        // 使用 Chrome Scripting MAIN world 於目標頁面原生執行建立
         const execResults = await chrome.scripting.executeScript({
           target: { tabId: currentTab.id },
           world: 'MAIN',
-          func: nativeCreatePlaylistInPage,
+          func: targetFunc,
           args: [categoryName, privacy, videoIds]
         });
 
@@ -715,17 +725,17 @@ document.addEventListener('DOMContentLoaded', () => {
           btnCreate.classList.remove('loading');
           btnCreate.classList.add('success');
           btnCreate.disabled = false;
-          btnCreate.innerHTML = `<span>↗️ 開啟清單 (${res.addedCount})</span>`;
-          btnCreate.title = `點擊在新分頁開啟「${categoryName}」播放清單`;
-          showToast(`🎉 成功建立「${categoryName}」清單 (共加入 ${res.addedCount} 部影片)！`);
+          btnCreate.innerHTML = `<span>↗️ ${openActionLabel} (${res.addedCount})</span>`;
+          btnCreate.title = `點擊在新分頁開啟「${categoryName}」${isBilibili ? '收藏夾' : '播放清單'}`;
+          showToast(`🎉 成功在 ${platformLabel} 建立「${categoryName}」(共加入 ${res.addedCount} 部影片)！`);
         } else {
           throw new Error(res?.error || '建立過程發生錯誤');
         }
       } catch (err) {
-        console.error('Create playlist error:', err);
+        console.error('Create playlist/fav error:', err);
         btnCreate.classList.remove('loading');
         btnCreate.disabled = false;
-        btnCreate.innerHTML = `<span>➕ 建立清單</span>`;
+        btnCreate.innerHTML = `<span>➕ ${actionLabel}</span>`;
         showToast(`❌ 建立失敗: ${err.message}`);
       }
     });
@@ -1415,5 +1425,164 @@ async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
     };
   } catch (err) {
     return { success: false, error: err.message || '執行建立過程發生未預期例外' };
+  }
+}
+
+/**
+ * 注入至 Bilibili 頁面原生環境 (MAIN world) 執行的建立收藏夾函式
+ * 透過 Bilibili Web API 建立收藏夾並批次加入影片 (BVID 轉 AID，支援 deal / batch-deal)
+ */
+async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoIds) {
+  try {
+    // 1. 取得 CSRF Token (bili_jct)
+    const csrfMatch = document.cookie.match(/(?:^|;\s*)bili_jct=([^;]+)/);
+    const csrf = csrfMatch ? csrfMatch[1] : '';
+
+    if (!csrf) {
+      return { success: false, error: '未能讀取 Bilibili 登入憑證 (bili_jct)，請確認已在 B 站登入帳號並重新整理頁面後再試！' };
+    }
+
+    // 2. 建立新收藏夾
+    const privacyCode = (privacy === 'PUBLIC') ? 0 : 1;
+    const createParams = new URLSearchParams();
+    createParams.append('title', categoryName);
+    createParams.append('intro', '由 YouTube/Bilibili 智慧分類器自動建立');
+    createParams.append('privacy', String(privacyCode));
+    createParams.append('csrf', csrf);
+
+    console.log('[Bilibili:NativeEngine] Creating favorite folder:', categoryName);
+
+    const createRes = await fetch('https://api.bilibili.com/x/v3/fav/folder/add', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json, text/plain, */*'
+      },
+      credentials: 'include',
+      body: createParams.toString()
+    });
+
+    if (!createRes.ok) {
+      return { success: false, error: `B站建立收藏夾 HTTP 錯誤 (狀態碼 ${createRes.status})` };
+    }
+
+    const createData = await createRes.json();
+    if (createData.code !== 0 || !createData.data?.id) {
+      return { success: false, error: createData.message || `B站建立收藏夾失敗 (錯誤碼 ${createData.code})` };
+    }
+
+    const folderId = createData.data.id;
+    const userMid = createData.data.mid || '';
+
+    // 3. 將 BVID 轉換為 AID (av 號)
+    const BILI_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
+    const BILI_TR = {};
+    for (let i = 0; i < 58; i++) {
+      BILI_TR[BILI_TABLE[i]] = i;
+    }
+    const BILI_S = [11, 10, 3, 8, 4, 6];
+    const BILI_XOR = 177451812;
+    const BILI_ADD = 8728348608;
+
+    function bvidToAid(bvid) {
+      if (!bvid) return null;
+      if (/^\d+$/.test(bvid)) return parseInt(bvid, 10);
+      if (/^av(\d+)$/i.test(bvid)) return parseInt(bvid.match(/^av(\d+)$/i)[1], 10);
+      let bvStr = bvid;
+      if (!bvStr.startsWith('BV') && !bvStr.startsWith('bv')) bvStr = 'BV' + bvStr;
+      if (bvStr.length !== 12) return null;
+      let r = 0;
+      for (let i = 0; i < 6; i++) {
+        r += BILI_TR[bvStr[BILI_S[i]]] * Math.pow(58, i);
+      }
+      return (r - BILI_ADD) ^ BILI_XOR;
+    }
+
+    const aids = [];
+    for (const vid of videoIds) {
+      const aid = bvidToAid(vid);
+      if (aid && typeof aid === 'number' && !isNaN(aid) && aid > 0) {
+        aids.push(aid);
+      }
+    }
+
+    console.log(`[Bilibili:NativeEngine] Folder created fid=${folderId}, adding ${aids.length} videos...`);
+
+    // 4. 批次將影片加入新收藏夾 (透過 batch-deal 批次接口，分批每批 20 部)
+    let addedSuccessCount = 0;
+    if (aids.length > 0) {
+      const batchSize = 20;
+      for (let i = 0; i < aids.length; i += batchSize) {
+        const chunk = aids.slice(i, i + batchSize);
+        try {
+          const batchParams = new URLSearchParams();
+          batchParams.append('resources', chunk.map(aid => `${aid}:2`).join(','));
+          batchParams.append('add_media_ids', String(folderId));
+          batchParams.append('del_media_ids', '');
+          batchParams.append('csrf', csrf);
+
+          const batchRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/batch-deal', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Accept': 'application/json, text/plain, */*'
+            },
+            credentials: 'include',
+            body: batchParams.toString()
+          });
+
+          const batchData = await batchRes.json();
+          if (batchData.code === 0) {
+            addedSuccessCount += chunk.length;
+          } else {
+            console.warn('[Bilibili:NativeEngine] batch-deal fallback to single deal:', batchData);
+            // Fallback: 單部加入
+            for (const singleAid of chunk) {
+              try {
+                const dealParams = new URLSearchParams();
+                dealParams.append('rid', String(singleAid));
+                dealParams.append('type', '2');
+                dealParams.append('add_media_ids', String(folderId));
+                dealParams.append('csrf', csrf);
+
+                const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                  },
+                  credentials: 'include',
+                  body: dealParams.toString()
+                });
+                const singleData = await singleRes.json();
+                if (singleData.code === 0) addedSuccessCount++;
+                await new Promise(r => setTimeout(r, 120));
+              } catch (_) {}
+            }
+          }
+        } catch (err) {
+          console.warn('[Bilibili:NativeEngine] Chunk error:', err);
+        }
+
+        // 稍微延遲防風控
+        if (i + batchSize < aids.length) {
+          await new Promise(r => setTimeout(r, 200));
+        }
+      }
+    }
+
+    const playlistUrl = userMid
+      ? `https://space.bilibili.com/${userMid}/favlist?fid=${folderId}`
+      : `https://www.bilibili.com/medialist/play/ml${folderId}`;
+
+    return {
+      success: true,
+      playlistId: String(folderId),
+      playlistUrl: playlistUrl,
+      addedCount: addedSuccessCount || aids.length,
+      categoryName: categoryName,
+      platform: 'bilibili'
+    };
+  } catch (err) {
+    return { success: false, error: err.message || 'B 站收藏夾建立過程發生異常' };
   }
 }
