@@ -488,6 +488,7 @@
               id: bvid,
               videoId: bvid,
               bvid,
+              aid: item.id ? String(item.id) : '',
               title,
               channelTitle: upperName,
               duration: durationText,
@@ -583,10 +584,15 @@
             if (thumbnail.startsWith('//')) thumbnail = `https:${thumbnail}`;
           }
 
+          let itemAid = '';
+          const aidAttr = card.getAttribute('data-aid') || card.getAttribute('data-id') || '';
+          if (aidAttr && /^\d+$/.test(aidAttr)) itemAid = aidAttr;
+
           videoMap.set(bvid, {
             id: bvid,
             videoId: bvid,
             bvid,
+            aid: itemAid,
             title: rawTitle,
             channelTitle,
             duration: duration || 'N/A',
@@ -736,42 +742,37 @@
           if (midMatch) userMid = midMatch[1];
         }
 
-        const BILI_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
-        const BILI_TR = {};
-        for (let i = 0; i < 58; i++) {
-          BILI_TR[BILI_TABLE[i]] = i;
-        }
-        const BILI_S = [11, 10, 3, 8, 4, 6];
-        const BILI_XOR = 177451812;
-        const BILI_ADD = 8728348608;
-
-        function bvidToAid(input) {
-          if (!input) return null;
-          if (typeof input === 'object') {
-            input = input.bvid || input.videoId || input.url || input.id || '';
+        async function getRealAid(item) {
+          if (!item) return null;
+          if (typeof item === 'object' && item.aid && /^\d+$/.test(String(item.aid))) {
+            return String(item.aid);
           }
-          const str = String(input).trim();
-          if (!str) return null;
-
-          if (/^\d+$/.test(str)) return parseInt(str, 10);
+          const raw = typeof item === 'object' ? (item.aid || item.bvid || item.videoId || item.url || item.id || '') : String(item);
+          const str = String(raw).trim();
+          if (/^\d+$/.test(str)) return str;
           const avMatch = str.match(/av(\d+)/i);
-          if (avMatch) return parseInt(avMatch[1], 10);
+          if (avMatch) return avMatch[1];
 
           const bvMatch = str.match(/(?:BV|bv)([a-zA-Z0-9]{10})/);
-          if (!bvMatch) return null;
-
-          const bvStr = 'BV' + bvMatch[1];
-          let r = 0;
-          for (let i = 0; i < 6; i++) {
-            r += BILI_TR[bvStr[BILI_S[i]]] * Math.pow(58, i);
+          if (bvMatch) {
+            const bv = 'BV' + bvMatch[1];
+            try {
+              const viewRes = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bv}`, {
+                credentials: 'include'
+              });
+              const viewData = await viewRes.json();
+              if (viewData.code === 0 && viewData.data?.aid) {
+                return String(viewData.data.aid);
+              }
+            } catch (_) {}
           }
-          return (r - BILI_ADD) ^ BILI_XOR;
+          return null;
         }
 
         const aids = [];
         for (const v of (videos || [])) {
-          const aid = bvidToAid(v);
-          if (aid && typeof aid === 'number' && !isNaN(aid) && aid > 0) {
+          const aid = await getRealAid(v);
+          if (aid && /^\d+$/.test(aid)) {
             aids.push(aid);
           }
         }
@@ -827,15 +828,16 @@
           return { success: false, error: '收藏夾已建立，但影片加入過程受 B 站風控或權限限制，請手動確認。' };
         }
 
+        const folderFid = createData.data.fid || folderId;
         const playlistUrl = userMid
-          ? `https://space.bilibili.com/${userMid}/favlist?fid=${folderId}`
+          ? `https://space.bilibili.com/${userMid}/favlist?fid=${folderFid}`
           : `https://www.bilibili.com/medialist/play/ml${folderId}`;
 
         return {
           success: true,
           playlistId: String(folderId),
           playlistUrl,
-          addedCount: addedSuccessCount || aids.length,
+          addedCount: addedSuccessCount,
           categoryName,
           platform: 'bilibili'
         };

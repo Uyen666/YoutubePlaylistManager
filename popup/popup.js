@@ -706,7 +706,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       try {
         const privacy = playlistPrivacySelect ? playlistPrivacySelect.value : 'PRIVATE';
-        const videoIds = videos.map(v => v.bvid || v.videoId || v.url || v.id).filter(Boolean);
+        const videoPayload = isBilibili
+          ? videos.map(v => ({ aid: v.aid || '', bvid: v.bvid || v.videoId || '', url: v.url || '', id: v.id || '' }))
+          : videos.map(v => v.videoId || v.bvid || v.url || v.id).filter(Boolean);
 
         const targetFunc = isBilibili ? nativeCreateBilibiliFavFolderInPage : nativeCreatePlaylistInPage;
 
@@ -715,7 +717,7 @@ document.addEventListener('DOMContentLoaded', () => {
           target: { tabId: currentTab.id },
           world: 'MAIN',
           func: targetFunc,
-          args: [categoryName, privacy, videoIds]
+          args: [categoryName, privacy, videoPayload]
         });
 
         const res = execResults?.[0]?.result;
@@ -1481,57 +1483,48 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
       userMid = String(window.__INITIAL_STATE__.mid);
     }
 
-    // 3. 高精度 BVID ➔ AID (av 號) 轉換器 (支援各類 URL、字串、物件)
-    const BILI_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
-    const BILI_TR = {};
-    for (let i = 0; i < 58; i++) {
-      BILI_TR[BILI_TABLE[i]] = i;
-    }
-    const BILI_S = [11, 10, 3, 8, 4, 6];
-    const BILI_XOR = 177451812;
-    const BILI_ADD = 8728348608;
-
-    function bvidToAid(input) {
-      if (!input) return null;
-      if (typeof input === 'object') {
-        input = input.bvid || input.videoId || input.url || input.id || '';
+    // 3. 高精度真實 AID 解析器 (支援直接傳入 AID、AV 號或透過官方 View API 獲取真實大整數 AID)
+    async function getRealAid(item) {
+      if (!item) return null;
+      if (typeof item === 'object' && item.aid && /^\d+$/.test(String(item.aid))) {
+        return String(item.aid);
       }
-      const str = String(input).trim();
-      if (!str) return null;
-
-      // 1. 純數字 AID
-      if (/^\d+$/.test(str)) return parseInt(str, 10);
-
-      // 2. av 號格式 (如 av243922477)
+      const raw = typeof item === 'object' ? (item.aid || item.bvid || item.videoId || item.url || item.id || '') : String(item);
+      const str = String(raw).trim();
+      if (/^\d+$/.test(str)) return str;
       const avMatch = str.match(/av(\d+)/i);
-      if (avMatch) return parseInt(avMatch[1], 10);
+      if (avMatch) return avMatch[1];
 
-      // 3. BV 號格式 (從任何 URL 或字串中提取 10 碼識別符)
       const bvMatch = str.match(/(?:BV|bv)([a-zA-Z0-9]{10})/);
-      if (!bvMatch) return null;
-
-      const bvStr = 'BV' + bvMatch[1];
-      let r = 0;
-      for (let i = 0; i < 6; i++) {
-        r += BILI_TR[bvStr[BILI_S[i]]] * Math.pow(58, i);
+      if (bvMatch) {
+        const bv = 'BV' + bvMatch[1];
+        try {
+          const viewRes = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bv}`, {
+            credentials: 'include'
+          });
+          const viewData = await viewRes.json();
+          if (viewData.code === 0 && viewData.data?.aid) {
+            return String(viewData.data.aid);
+          }
+        } catch (_) {}
       }
-      return (r - BILI_ADD) ^ BILI_XOR;
+      return null;
     }
 
     const aids = [];
     for (const vid of videoIds) {
-      const aid = bvidToAid(vid);
-      if (aid && typeof aid === 'number' && !isNaN(aid) && aid > 0) {
+      const aid = await getRealAid(vid);
+      if (aid && /^\d+$/.test(aid)) {
         aids.push(aid);
       }
     }
 
-    console.log(`[Bilibili:NativeEngine] Folder created fid=${folderId}, adding ${aids.length} videos sequentially via deal API...`);
+    console.log(`[Bilibili:NativeEngine] Folder created fid=${folderId}, adding ${aids.length} videos sequentially via deal API (AIDs: ${aids.join(',')})...`);
 
     // 4. 直接使用穩健的 deal 接口逐一將影片寫入新收藏夾
     async function addVideoToFolder(targetMediaId, aid, csrfToken) {
       const params = new URLSearchParams();
-      params.append('rid', aid.toString());        // 影片 AID（純數字，不加 :2）
+      params.append('rid', aid.toString());        // 影片真實純數字 AID
       params.append('type', '2');                  // 2 代表視頻稿件
       params.append('add_media_ids', targetMediaId.toString()); // 目標收藏夾 ID
       params.append('del_media_ids', '');          // 不從其他清單移除
@@ -1575,8 +1568,9 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
       return { success: false, error: '收藏夾已建立，但影片加入過程受 B 站風控或權限限制，請手動確認。' };
     }
 
+    const folderFid = createData.data.fid || folderId;
     const playlistUrl = userMid
-      ? `https://space.bilibili.com/${userMid}/favlist?fid=${folderId}`
+      ? `https://space.bilibili.com/${userMid}/favlist?fid=${folderFid}`
       : `https://www.bilibili.com/medialist/play/ml${folderId}`;
 
     return {
