@@ -55,10 +55,30 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 // ==========================================
-// 背景訊息通訊監聽器
+// 背景任務記憶體狀態與通訊監聽器
 // ==========================================
+let currentTaskState = {
+  status: 'idle',
+  progressPercent: 0,
+  statusTitle: '',
+  statusDetail: '',
+  playlistUrl: '',
+  playlistTitle: '',
+  totalVideos: 0,
+  categorizedResults: {},
+  updatedAt: Date.now()
+};
+
 let isTaskRunning = false;
 let currentCancelToken = false;
+let lastProgressStorageWrite = 0;
+
+// 初始化載入既有狀態
+chrome.storage.local.get(['currentTask'], (result) => {
+  if (result.currentTask) {
+    currentTaskState = result.currentTask;
+  }
+});
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'START_ANALYSIS') {
@@ -102,56 +122,55 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   // 監聽來自 content script 的即時滾動進度
-  if (request.action === 'SCRAPE_PROGRESS' && isTaskRunning) {
+  if (request.action === 'SCRAPE_PROGRESS') {
+    // 同步記憶體即時防禦：若任務非執行中或已完成，一律直接丟棄
+    if (!isTaskRunning || currentTaskState.status === 'completed') {
+      return false;
+    }
+
     const current = request.currentCount || 0;
     const target = request.target || 0;
     const targetText = target === Infinity ? '全部' : target;
-    
-    chrome.storage.local.get(['currentTask'], (res) => {
-      // 若任務已結束或已完成，不再處理過期之進度訊息
-      if (!isTaskRunning || res.currentTask?.status === 'completed') return;
+    const isQuick = currentTaskState.model === '純擷取 (0 Token)';
+    const maxPercent = isQuick ? 90 : 40;
+    const stepLabel = isQuick ? '正在背景滾動網頁擷取影片...' : '步驟 1/2: 正在滾動網頁擷取影片...';
+    const percent = Math.min(maxPercent, Math.round((current / (target === Infinity ? current + 20 : target)) * maxPercent));
 
-      const isQuick = res.currentTask?.model === '純擷取 (0 Token)';
-      const maxPercent = isQuick ? 90 : 40;
-      const stepLabel = isQuick ? '正在背景滾動網頁擷取影片...' : '步驟 1/2: 正在滾動網頁擷取影片...';
-      const percent = Math.min(maxPercent, Math.round((current / (target === Infinity ? current + 20 : target)) * maxPercent));
+    const now = Date.now();
+    if (now - lastProgressStorageWrite > 250 || percent >= maxPercent) {
+      lastProgressStorageWrite = now;
       updateTaskState({
         status: 'scraping',
         progressPercent: percent,
         statusTitle: stepLabel,
         statusDetail: `已發現 ${current} 部影片 (目標: ${targetText})`
       });
-    });
+    }
+    return false;
   }
 });
 
 /**
- * 輔助更新 chrome.storage.local 中的 currentTask 狀態 (含狀態鎖定保護)
+ * 輔助更新 chrome.storage.local 中的 currentTask 狀態 (同步記憶體狀態保護)
  */
 async function updateTaskState(partialState) {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(['currentTask'], (result) => {
-      const currentTask = result.currentTask || {};
+  // 嚴格狀態保護：若任務已處於 completed 狀態，嚴禁任何進度覆寫
+  if (partialState.status === 'scraping' || partialState.status === 'classifying') {
+    if (!isTaskRunning || currentTaskState.status === 'completed') {
+      console.warn('[YT-AI-Classifier:Background] Blocked late progress update from overriding completed task state.');
+      return currentTaskState;
+    }
+  }
 
-      // 嚴格狀態保護：若任務已完成/結束，禁止被任何延遲的進度訊息竄改回 scraping 或 classifying
-      if (partialState.status === 'scraping' || partialState.status === 'classifying') {
-        if (!isTaskRunning || currentTask.status === 'completed') {
-          console.warn('[YT-AI-Classifier:Background] Blocked late progress update from overriding completed task state.');
-          resolve(currentTask);
-          return;
-        }
-      }
+  // 同步更新記憶體狀態，零延遲防競態
+  currentTaskState = {
+    ...currentTaskState,
+    ...partialState,
+    updatedAt: Date.now()
+  };
 
-      const updated = {
-        ...currentTask,
-        ...partialState,
-        updatedAt: Date.now()
-      };
-      chrome.storage.local.set({ currentTask: updated }, () => {
-        resolve(updated);
-      });
-    });
-  });
+  await chrome.storage.local.set({ currentTask: currentTaskState });
+  return currentTaskState;
 }
 
 /**
@@ -251,6 +270,8 @@ async function handleStartAnalysis(params) {
       if (!categorizedResults[cat]) categorizedResults[cat] = [];
       categorizedResults[cat].push(v);
     });
+
+    isTaskRunning = false;
 
     await updateTaskState({
       status: 'completed',
@@ -362,6 +383,8 @@ async function handleStartQuickExtract(params) {
         category: '全部影片 (未分類)'
       }))
     };
+
+    isTaskRunning = false;
 
     await updateTaskState({
       status: 'completed',
