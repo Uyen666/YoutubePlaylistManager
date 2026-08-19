@@ -24,13 +24,19 @@ GitHub 儲存庫：[https://github.com/Uyen666/YoutubePlaylistManager](https://g
    - **指數退避重試 (Exponential Backoff)**：若遇 API Rate Limit (HTTP 429) 或網路異常，自動進行指數延遲重試。
    - **嚴格結構化輸出**：支援 Gemini Native Schema Enum 與 OpenAI JSON Object，具備多層次映射與模糊比對容錯機制。
 
-3. **🎨 現代化深色 UI (`popup.html` & `popup.css`)**：
+3. **🤖 DOM 自動化一鍵在 YouTube 建立清單 (`Step 2`)**：
+   - 每個分類卡片支援一鍵「**➕ 建立清單**」功能。
+   - 自動在 YouTube 介面模擬建立全新播放清單、設定自訂隱私度（私人 / 不公開 / 公開）。
+   - 智慧定位影片 DOM 節點，批次自動勾選並加入該分類的所有影片。
+   - 具備 600ms~1000ms 操作延遲節流，防止 YouTube 頻率限制或動畫卡死。
+
+4. **🎨 現代化深色 UI (`popup.html` & `popup.css`)**：
    - 即時分頁狀態偵測（非 YouTube 清單時友善提示並禁用按鈕）。
    - 雙階段進度條（DOM 擷取進度 ➔ AI 批次分類進度）。
    - 手風琴式分類卡片（依影片數量自動排序、支援展開/收合、點擊直達 YouTube 影片）。
    - 多種格式匯出：**📋 一鍵複製 Markdown**、**💾 匯出 JSON**、**📊 匯出 CSV**。
 
-4. **🔒 安全與隱私保護**：
+5. **🔒 安全與隱私保護**：
    - API Key 僅儲存於使用者本機 `chrome.storage.local`，絕不上傳任何第三方伺服器。
 
 ---

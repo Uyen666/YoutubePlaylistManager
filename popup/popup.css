@@ -672,6 +672,52 @@ body {
   border-radius: 10px;
 }
 
+.category-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-create-playlist {
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  color: #a5b4fc;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.btn-create-playlist:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.35);
+  color: #ffffff;
+  border-color: var(--accent-indigo);
+  transform: translateY(-1px);
+}
+
+.btn-create-playlist:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.btn-create-playlist.loading {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fde047;
+}
+
+.btn-create-playlist.success {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #6ee7b7;
+}
+
 .category-chevron {
   font-size: 12px;
   color: var(--text-muted);

@@ -27,6 +27,10 @@ chrome.runtime.onInstalled.addListener((details) => {
       defaultSettings.maxItems = '100';
     }
 
+    if (!result.privacy) {
+      defaultSettings.privacy = 'PRIVATE';
+    }
+
     // 初始化任務狀態為 idle
     if (!result.currentTask) {
       defaultSettings.currentTask = {

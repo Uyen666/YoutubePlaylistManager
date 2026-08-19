@@ -232,9 +232,338 @@
     return Array.from(videoMap.values()).slice(0, targetMax);
   }
 
+  // ==========================================
+  // Step 2 DOM 自動化：建立播放清單與批次加入影片
+  // ==========================================
+
   /**
-   * 訊息通訊監聽器 (接收來自 Popup 的指令)
+   * 輔助延遲函式
    */
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 模擬原生滑鼠點擊事件 (支援 Web Components 與 Shadow DOM 穿透)
+   */
+  function simulateClick(element) {
+    if (!element) return false;
+    element.focus?.();
+    const eventOpts = { bubbles: true, cancelable: true, view: window };
+    element.dispatchEvent(new MouseEvent('mousedown', eventOpts));
+    element.dispatchEvent(new MouseEvent('mouseup', eventOpts));
+    element.dispatchEvent(new MouseEvent('click', eventOpts));
+    if (typeof element.click === 'function') {
+      element.click();
+    }
+    return true;
+  }
+
+  /**
+   * 非同步等待元素出現 (帶 Timeout 容錯)
+   */
+  async function waitForElement(selectorFn, timeoutMs = 4000, intervalMs = 200) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      const el = selectorFn();
+      if (el) return el;
+      await sleep(intervalMs);
+    }
+    return null;
+  }
+
+  /**
+   * 關閉目前開啟的 YouTube 彈窗或對話框
+   */
+  async function closeOpenDialogs() {
+    // 1. 嘗試尋找關閉按鈕
+    const closeBtn = document.querySelector('ytd-add-to-playlist-renderer #close-button button') ||
+                     document.querySelector('ytd-add-to-playlist-renderer button[aria-label*="關閉"]') ||
+                     document.querySelector('ytd-add-to-playlist-renderer button[aria-label*="Close"]') ||
+                     document.querySelector('tp-yt-paper-dialog button#button');
+    if (closeBtn) {
+      simulateClick(closeBtn);
+      await sleep(400);
+      return;
+    }
+
+    // 2. 發送 ESC 鍵關閉
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    await sleep(400);
+  }
+
+  /**
+   * 在頁面中尋找指定 videoId 的影片 DOM 節點
+   */
+  async function findVideoElement(videoId, title) {
+    const selectors = [
+      'ytd-playlist-video-renderer',
+      'ytd-playlist-panel-video-renderer',
+      'ytd-item-section-renderer ytd-playlist-video-renderer',
+      '#contents > ytd-playlist-video-renderer'
+    ];
+
+    let foundEl = null;
+    const elements = document.querySelectorAll(selectors.join(', '));
+
+    for (const el of elements) {
+      const link = el.querySelector('a#video-title') || el.querySelector('a#thumbnail') || el.querySelector('a[href*="/watch"]');
+      const href = link ? link.getAttribute('href') : '';
+      if (videoId && href && href.includes(videoId)) {
+        foundEl = el;
+        break;
+      }
+      const titleEl = el.querySelector('#video-title');
+      const currentTitle = titleEl ? (titleEl.textContent || '').trim() : '';
+      if (title && currentTitle && currentTitle === title.trim()) {
+        foundEl = el;
+        break;
+      }
+    }
+
+    // 若當前 DOM 沒找到，嘗試滾動頁面加載
+    if (!foundEl) {
+      window.scrollBy({ top: 1200, behavior: 'smooth' });
+      await sleep(700);
+      const retryElements = document.querySelectorAll(selectors.join(', '));
+      for (const el of retryElements) {
+        const link = el.querySelector('a#video-title') || el.querySelector('a#thumbnail') || el.querySelector('a[href*="/watch"]');
+        const href = link ? link.getAttribute('href') : '';
+        if (videoId && href && href.includes(videoId)) {
+          foundEl = el;
+          break;
+        }
+      }
+    }
+
+    return foundEl;
+  }
+
+  /**
+   * 自動建立 YouTube 播放清單並批次加入分類影片
+   */
+  async function createCategoryPlaylist(categoryName, privacy = 'PRIVATE', videos = [], onProgress = null) {
+    if (!videos || videos.length === 0) {
+      throw new Error('分類中無影片可加入');
+    }
+
+    console.log(`[YT-AI-Classifier:DOM-Automation] Starting creation for "${categoryName}" with ${videos.length} videos. Privacy: ${privacy}`);
+
+    let addedCount = 0;
+    let failedCount = 0;
+    let playlistCreated = false;
+
+    for (let i = 0; i < videos.length; i++) {
+      const video = videos[i];
+      if (onProgress) {
+        onProgress(i + 1, videos.length, video.title);
+      }
+
+      try {
+        await closeOpenDialogs();
+
+        // 1. 尋找影片 DOM 節點
+        const videoEl = await findVideoElement(video.videoId, video.title);
+        if (!videoEl) {
+          console.warn(`[YT-AI-Classifier:DOM-Automation] Video not found in DOM: ${video.title}`);
+          failedCount++;
+          continue;
+        }
+
+        // 2. 平滑滾動至可視區域
+        videoEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await sleep(600);
+
+        // 3. 點擊影片右側三點選單按鈕
+        const menuBtn = videoEl.querySelector('button.yt-icon-button#button') ||
+                        videoEl.querySelector('ytd-menu-renderer yt-icon-button#button') ||
+                        videoEl.querySelector('yt-icon-button.dropdown-trigger') ||
+                        videoEl.querySelector('button[aria-label*="Action"]') ||
+                        videoEl.querySelector('button[aria-label*="操作"]') ||
+                        videoEl.querySelector('ytd-menu-renderer button');
+
+        if (!menuBtn) {
+          console.warn(`[YT-AI-Classifier:DOM-Automation] Menu button not found for: ${video.title}`);
+          failedCount++;
+          continue;
+        }
+
+        simulateClick(menuBtn);
+        await sleep(700);
+
+        // 4. 在彈出選單中尋找並點擊「儲存至播放清單」
+        const saveItem = await waitForElement(() => {
+          const items = document.querySelectorAll('ytd-menu-service-item-renderer, ytd-menu-popup-renderer tp-yt-paper-item, ytd-menu-navigation-item-renderer');
+          for (const item of items) {
+            const text = (item.textContent || '').trim();
+            if (
+              text.includes('儲存至播放清單') ||
+              text.includes('儲存') ||
+              text.includes('Save to playlist') ||
+              text.includes('Save') ||
+              text.includes('プレイリストに保存') ||
+              text.includes('保存到播放列表')
+            ) {
+              return item;
+            }
+          }
+          return null;
+        }, 3000);
+
+        if (!saveItem) {
+          console.warn(`[YT-AI-Classifier:DOM-Automation] "Save to playlist" menu option not found.`);
+          await closeOpenDialogs();
+          failedCount++;
+          continue;
+        }
+
+        simulateClick(saveItem);
+        await sleep(900);
+
+        // 5. 等待「儲存至播放清單」對話框彈出
+        const dialog = await waitForElement(() => {
+          return document.querySelector('ytd-add-to-playlist-renderer, tp-yt-paper-dialog:not([aria-hidden="true"])');
+        }, 3500);
+
+        if (!dialog) {
+          console.warn(`[YT-AI-Classifier:DOM-Automation] Playlist dialog did not open.`);
+          await closeOpenDialogs();
+          failedCount++;
+          continue;
+        }
+
+        // ----------------------------------------------------
+        // 分支 A: 第一部影片 -> 建立新播放清單
+        // ----------------------------------------------------
+        if (!playlistCreated) {
+          // 檢查是否已存在同名清單
+          const existingOption = findPlaylistOptionInDialog(dialog, categoryName);
+
+          if (existingOption) {
+            console.log(`[YT-AI-Classifier:DOM-Automation] Found existing playlist "${categoryName}", checking it.`);
+            await togglePlaylistCheckbox(existingOption, true);
+            playlistCreated = true;
+          } else {
+            console.log(`[YT-AI-Classifier:DOM-Automation] Creating new playlist "${categoryName}"...`);
+
+            // 尋找「建立新的播放清單」按鈕
+            const createNewBtn = dialog.querySelector('ytd-add-to-playlist-create-renderer button') ||
+                                 dialog.querySelector('button[aria-label*="建立新"]') ||
+                                 dialog.querySelector('button[aria-label*="Create new"]') ||
+                                 findButtonByText(dialog, ['建立新的播放清單', '建立新播放清單', 'Create new playlist', '新しいプレイリストを作成', '创建新播放列表']);
+
+            if (createNewBtn) {
+              simulateClick(createNewBtn);
+              await sleep(700);
+
+              // 填寫清單標題
+              const nameInput = dialog.querySelector('input#input-1') ||
+                                dialog.querySelector('tp-yt-paper-input input') ||
+                                dialog.querySelector('input[type="text"]') ||
+                                dialog.querySelector('textarea');
+
+              if (nameInput) {
+                nameInput.focus();
+                nameInput.value = categoryName;
+                nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+                nameInput.dispatchEvent(new Event('change', { bubbles: true }));
+                await sleep(500);
+
+                // 設定隱私度 (若可選)
+                const privacyDropdown = dialog.querySelector('tp-yt-paper-dropdown-menu, #privacy-picker, ytd-privacy-dropdown-item-renderer');
+                if (privacyDropdown && privacy !== 'PUBLIC') {
+                  simulateClick(privacyDropdown);
+                  await sleep(500);
+                  const privacyOption = document.querySelector(`tp-yt-paper-item[value="${privacy}"], tp-yt-paper-listbox tp-yt-paper-item`);
+                  if (privacyOption) simulateClick(privacyOption);
+                  await sleep(400);
+                }
+
+                // 點擊「建立」按鈕
+                const confirmCreateBtn = dialog.querySelector('tp-yt-paper-button#button') ||
+                                         dialog.querySelector('ytd-button-renderer#create-button button') ||
+                                         findButtonByText(dialog, ['建立', 'Create', '作成', '创建']);
+
+                if (confirmCreateBtn) {
+                  simulateClick(confirmCreateBtn);
+                  await sleep(1400);
+                  playlistCreated = true;
+                  console.log(`[YT-AI-Classifier:DOM-Automation] Playlist "${categoryName}" created successfully!`);
+                }
+              }
+            }
+          }
+        } else {
+          // ----------------------------------------------------
+          // 分支 B: 後續影片 -> 勾選現有分類清單
+          // ----------------------------------------------------
+          await sleep(500);
+          const targetOption = findPlaylistOptionInDialog(dialog, categoryName);
+
+          if (targetOption) {
+            await togglePlaylistCheckbox(targetOption, true);
+          } else {
+            console.warn(`[YT-AI-Classifier:DOM-Automation] Playlist option "${categoryName}" not found in list dialog.`);
+          }
+        }
+
+        addedCount++;
+        await closeOpenDialogs();
+        await sleep(600); // 平滑節流間隔
+
+      } catch (videoErr) {
+        console.error(`[YT-AI-Classifier:DOM-Automation] Error processing video ${video.title}:`, videoErr);
+        await closeOpenDialogs();
+        failedCount++;
+      }
+    }
+
+    return {
+      success: addedCount > 0,
+      addedCount,
+      failedCount,
+      categoryName
+    };
+  }
+
+  function findPlaylistOptionInDialog(dialog, name) {
+    const options = dialog.querySelectorAll('ytd-playlist-add-to-option-renderer, tp-yt-paper-checkbox');
+    for (const opt of options) {
+      const text = (opt.textContent || '').trim();
+      if (text.includes(name)) {
+        return opt;
+      }
+    }
+    return null;
+  }
+
+  async function togglePlaylistCheckbox(optionEl, shouldCheck = true) {
+    const checkbox = optionEl.querySelector('#checkbox') ||
+                     optionEl.querySelector('tp-yt-paper-checkbox') ||
+                     optionEl;
+
+    const isChecked = checkbox.getAttribute('aria-checked') === 'true' || checkbox.checked === true;
+
+    if (shouldCheck && !isChecked) {
+      simulateClick(checkbox);
+      await sleep(500);
+    }
+  }
+
+  function findButtonByText(parent, textList) {
+    const buttons = parent.querySelectorAll('button, tp-yt-paper-button, [role="button"]');
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').trim();
+      for (const t of textList) {
+        if (text.includes(t)) return btn;
+      }
+    }
+    return null;
+  }
+
+  // ==========================================
+  // 訊息通訊監聽器 (接收來自 Popup 的指令)
+  // ==========================================
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // 檢查頁面狀態
     if (request.action === 'CHECK_PAGE') {
@@ -252,7 +581,6 @@
       const maxItems = Number(request.maxItems) || 0;
 
       autoScrollAndScrape(maxItems, (currentCount, target) => {
-        // 發送即時進度到 Popup (Popup 若關閉或沒監聽則忽略)
         try {
           chrome.runtime.sendMessage({
             action: 'SCRAPE_PROGRESS',
@@ -283,8 +611,37 @@
           });
         });
 
-      // 保持非同步通道開啟
+      return true;
+    }
+
+    // Step 2: 自動在 YouTube 建立分類播放清單並批次加入影片
+    if (request.action === 'CREATE_CATEGORY_PLAYLIST') {
+      const { categoryName, privacy, videos } = request;
+
+      createCategoryPlaylist(categoryName, privacy, videos, (current, total, currentTitle) => {
+        try {
+          chrome.runtime.sendMessage({
+            action: 'CREATE_PLAYLIST_PROGRESS',
+            categoryName,
+            current,
+            total,
+            currentTitle
+          }).catch(() => {});
+        } catch (_) {}
+      })
+        .then((result) => {
+          sendResponse(result);
+        })
+        .catch((err) => {
+          console.error('[YT-AI-Classifier] Create playlist error:', err);
+          sendResponse({
+            success: false,
+            error: err.message || '建立播放清單失敗'
+          });
+        });
+
       return true;
     }
   });
 })();
+

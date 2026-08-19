@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const apiKeyHelpLink = document.getElementById('apiKeyHelpLink');
   const categoriesInput = document.getElementById('categoriesInput');
   const maxItemsSelect = document.getElementById('maxItemsSelect');
+  const playlistPrivacySelect = document.getElementById('playlistPrivacySelect');
   const saveSettingsBtn = document.getElementById('saveSettingsBtn');
   const saveStatus = document.getElementById('saveStatus');
   const presetButtons = document.querySelectorAll('.preset-btn');
@@ -156,6 +157,16 @@ document.addEventListener('DOMContentLoaded', () => {
         handleTaskStateUpdate(changes.currentTask.newValue);
       }
     });
+
+    // 監聽來自 Content Script 的 DOM 自動化建立進度
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message.action === 'CREATE_PLAYLIST_PROGRESS') {
+        const activeBtn = document.querySelector(`.category-card[data-category="${message.categoryName}"] .btn-create-playlist`);
+        if (activeBtn) {
+          activeBtn.innerHTML = `<span>⏳ 加入中 (${message.current}/${message.total})...</span>`;
+        }
+      }
+    });
   }
 
   // ==========================================
@@ -163,7 +174,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   async function loadSettings() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(['provider', 'customModel', 'apiKey', 'categories', 'maxItems'], (result) => {
+      chrome.storage.local.get(['provider', 'customModel', 'apiKey', 'categories', 'maxItems', 'privacy'], (result) => {
         let provider = result.provider || 'gemini-3.6-flash';
         if (provider === 'gemini-2.0-flash') {
           provider = 'gemini-3.6-flash';
@@ -175,6 +186,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (result.apiKey) apiKeyInput.value = result.apiKey;
         categoriesInput.value = result.categories || DEFAULT_CATEGORIES;
         if (result.maxItems) maxItemsSelect.value = result.maxItems;
+        if (result.privacy && playlistPrivacySelect) playlistPrivacySelect.value = result.privacy;
 
         toggleCustomModelField(provider);
         updateApiKeyHelpLink(provider);
@@ -215,7 +227,8 @@ document.addEventListener('DOMContentLoaded', () => {
       customModel: customModelInput.value.trim(),
       apiKey: apiKeyInput.value.trim(),
       categories: categoriesInput.value.trim() || DEFAULT_CATEGORIES,
-      maxItems: maxItemsSelect.value
+      maxItems: maxItemsSelect.value,
+      privacy: playlistPrivacySelect ? playlistPrivacySelect.value : 'PRIVATE'
     };
 
     chrome.storage.local.set(settings, () => {
@@ -515,6 +528,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function createCategoryCard(categoryName, videos, color) {
     const card = document.createElement('div');
     card.className = 'category-card';
+    card.setAttribute('data-category', categoryName);
 
     const header = document.createElement('div');
     header.className = 'category-header';
@@ -524,8 +538,56 @@ document.addEventListener('DOMContentLoaded', () => {
         <span class="category-name">${escapeHtml(categoryName)}</span>
         <span class="category-badge">${videos.length} 部</span>
       </div>
-      <span class="category-chevron">▶</span>
+      <div class="category-header-right">
+        <button class="btn-create-playlist" title="在 YouTube 自動建立此分類播放清單並加入影片">
+          <span>➕ 建立清單</span>
+        </button>
+        <span class="category-chevron">▶</span>
+      </div>
     `;
+
+    // 綁定「在 YouTube 建立此清單」點擊事件
+    const btnCreate = header.querySelector('.btn-create-playlist');
+    btnCreate.addEventListener('click', async (e) => {
+      e.stopPropagation(); // 防止觸發手風琴開闔
+
+      if (btnCreate.disabled) return;
+
+      if (!currentTab || !currentTab.id) {
+        showToast('⚠️ 未能取得當前 YouTube 分頁');
+        return;
+      }
+
+      btnCreate.disabled = true;
+      btnCreate.classList.add('loading');
+      btnCreate.innerHTML = `<span>⏳ 建立中 (0/${videos.length})...</span>`;
+      showToast(`🚀 開始在 YouTube 自動建立「${categoryName}」播放清單...`);
+
+      try {
+        const privacy = playlistPrivacySelect ? playlistPrivacySelect.value : 'PRIVATE';
+        const res = await chrome.tabs.sendMessage(currentTab.id, {
+          action: 'CREATE_CATEGORY_PLAYLIST',
+          categoryName,
+          privacy,
+          videos
+        });
+
+        if (res && res.success) {
+          btnCreate.classList.remove('loading');
+          btnCreate.classList.add('success');
+          btnCreate.innerHTML = `<span>✔️ 已建立 (${res.addedCount})</span>`;
+          showToast(`🎉 成功在 YouTube 建立「${categoryName}」清單 (共加入 ${res.addedCount} 部影片)！`);
+        } else {
+          throw new Error(res?.error || '建立過程發生錯誤');
+        }
+      } catch (err) {
+        console.error('Create playlist error:', err);
+        btnCreate.classList.remove('loading');
+        btnCreate.disabled = false;
+        btnCreate.innerHTML = `<span>➕ 建立清單</span>`;
+        showToast(`❌ 建立清單失敗: ${err.message}`);
+      }
+    });
 
     const body = document.createElement('div');
     body.className = 'category-body';
@@ -555,8 +617,9 @@ document.addEventListener('DOMContentLoaded', () => {
       body.appendChild(item);
     });
 
-    // 點擊 Header 切換展開
-    header.addEventListener('click', () => {
+    // 點擊 Header 切換展開 (排除點擊按鈕的情況)
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('.btn-create-playlist')) return;
       card.classList.toggle('open');
     });
 
