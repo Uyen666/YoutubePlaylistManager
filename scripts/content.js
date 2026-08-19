@@ -189,19 +189,53 @@
   }
 
   /**
-   * 平滑向下滾動並自動擷取清單
+   * 偵測當前 YouTube 播放清單的總影片數量
+   */
+  function detectPlaylistTotalCount() {
+    try {
+      // 1. 播放清單主頁統計 (例: "561 部影片" / "561 videos")
+      const statsElements = document.querySelectorAll(
+        'ytd-playlist-header-renderer .metadata-stats, ytd-playlist-header-renderer yt-formatted-string, #stats yt-formatted-string, .byline-item'
+      );
+      for (const el of statsElements) {
+        const text = el.textContent || '';
+        const match = text.match(/([\d,]+)\s*(?:部影片|videos?|個項目)/i);
+        if (match) {
+          const num = parseInt(match[1].replace(/,/g, ''), 10);
+          if (!isNaN(num) && num > 0) return num;
+        }
+      }
+
+      // 2. 影片播放頁面播放清單面板 (例: "1 / 561")
+      const panelIndexEl = document.querySelector('ytd-playlist-panel-renderer .index-message-wrapper') ||
+                           document.querySelector('ytd-playlist-panel-renderer #publisher-container span');
+      if (panelIndexEl) {
+        const text = panelIndexEl.textContent || '';
+        const match = text.match(/\/\s*([\d,]+)/);
+        if (match) {
+          const num = parseInt(match[1].replace(/,/g, ''), 10);
+          if (!isNaN(num) && num > 0) return num;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * 平滑向下滾動並自動擷取清單 (支援 500+ ~ 2000+ 部大清單完整載入)
    * @param {number} maxItems - 欲擷取的最大影片數量 (0 或負數表示全部)
    * @param {function} onProgress - 進度回呼函式
    * @returns {Promise<Array<Object>>}
    */
   async function autoScrollAndScrape(maxItems = 0, onProgress = null) {
     const videoMap = new Map();
-    const targetMax = maxItems > 0 ? maxItems : Infinity;
+    const detectedTotal = detectPlaylistTotalCount();
+    const targetMax = maxItems > 0 ? maxItems : (detectedTotal || Infinity);
 
     // 先做一次初始掃描
     scrapeVisibleVideos(videoMap);
     if (onProgress) {
-      onProgress(videoMap.size, targetMax);
+      onProgress(videoMap.size, targetMax === Infinity ? 0 : targetMax);
     }
 
     // 若已經達到設定上限，直接返回
@@ -210,64 +244,74 @@
     }
 
     let noChangeCount = 0;
-    const maxNoChangeTries = 4; // 連續 4 次沒抓到新內容視為載入到底部
-    let lastHeight = 0;
+    const maxNoChangeTries = 6; // 連續 6 次滾動無新影片才視為載入完畢
+    let lastVideoCount = videoMap.size;
+    let lastProgressTime = Date.now();
 
-    // 尋找滾動容器 (YouTube 播放清單可能是 window 或特定容器如 #contents / #items)
+    // 尋找滾動容器
+    const isWatchPage = window.location.pathname.includes('/watch');
     const playlistPanel = document.querySelector('ytd-playlist-panel-renderer #items') ||
                           document.querySelector('#items.ytd-playlist-panel-renderer');
+    const scrollContainer = isWatchPage ? playlistPanel : null;
 
-    const scrollContainer = playlistPanel || null;
-
-    console.log('[YT-AI-Classifier] Starting auto-scroll scraping. Target:', targetMax);
+    console.log('[YT-AI-Classifier] Starting auto-scroll scraping. Target:', targetMax, 'Detected total:', detectedTotal);
     const scrapeStartTime = Date.now();
-    const maxScrapeDurationMs = 15000; // 最多滾動 15 秒，避免背景分頁無限期卡住
+    const absoluteMaxDurationMs = 180000; // 絕對安全上限 3 分鐘 (可支援 2000+ 部大清單)
+    const inactivityTimeoutMs = 15000; // 只要 15 秒內持續有新影片載入就絕不中斷！
 
-    while (videoMap.size < targetMax && noChangeCount < maxNoChangeTries) {
-      if (Date.now() - scrapeStartTime > maxScrapeDurationMs) {
-        console.warn('[YT-AI-Classifier] Scraping reached max duration (15s). Proceeding with collected videos.');
+    while (videoMap.size < targetMax) {
+      // 檢查絕對安全超時 (3 分鐘)
+      if (Date.now() - scrapeStartTime > absoluteMaxDurationMs) {
+        console.warn('[YT-AI-Classifier] Reached absolute max duration (3m). Proceeding with collected videos.');
         break;
       }
 
-      // 執行滾動
-      if (scrollContainer) {
-        scrollContainer.scrollTop += 1200;
-      } else {
-        window.scrollBy({ top: 1200, behavior: 'smooth' });
-        // 同步直接滾到底
-        window.scrollTo(0, document.documentElement.scrollHeight);
+      // 檢查無進展超時 (連續 15 秒且 6 次重試完全沒有載入任何新影片才停止)
+      if (Date.now() - lastProgressTime > inactivityTimeoutMs && noChangeCount >= maxNoChangeTries) {
+        console.log('[YT-AI-Classifier] No new videos loaded after inactivity timeout. Finished scraping.');
+        break;
       }
 
-      // 等待 DOM 渲染與 YouTube API 非同步請求
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      // 1. 若有加載指示器，優先將指示器滾入視窗以觸發 YouTube API Continuation 請求
+      const continuationItem = document.querySelector('ytd-continuation-item-renderer');
+      if (continuationItem && typeof continuationItem.scrollIntoView === 'function') {
+        continuationItem.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }
 
-      const added = scrapeVisibleVideos(videoMap);
+      // 2. 執行向下滾動
+      if (scrollContainer) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      } else {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        window.scrollBy({ top: 1500, behavior: 'smooth' });
+      }
+
+      // 3. 等待 YouTube DOM 非同步渲染 (若無新內容稍作多等待 1000ms)
+      const waitTime = noChangeCount > 0 ? 1000 : 700;
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+      scrapeVisibleVideos(videoMap);
+
+      if (videoMap.size > lastVideoCount) {
+        lastProgressTime = Date.now(); // 重設活動計時器
+        lastVideoCount = videoMap.size;
+        noChangeCount = 0;
+      } else {
+        noChangeCount++;
+        // 嘗試輕微回滾並再滾到底以觸發 YouTube IntersectionObserver 監聽
+        if (!scrollContainer) {
+          window.scrollBy(0, -250);
+          await new Promise(r => setTimeout(r, 200));
+          window.scrollTo(0, document.documentElement.scrollHeight);
+        }
+      }
 
       if (onProgress) {
-        onProgress(Math.min(videoMap.size, targetMax), targetMax);
-      }
-
-      const currentHeight = scrollContainer
-        ? scrollContainer.scrollHeight
-        : document.documentElement.scrollHeight;
-
-      if (added === 0 && currentHeight === lastHeight) {
-        noChangeCount++;
-      } else {
-        noChangeCount = 0;
-      }
-
-      lastHeight = currentHeight;
-
-      // 檢查是否還有加載指示器
-      const hasSpinner = !!document.querySelector('ytd-continuation-item-renderer');
-      if (!hasSpinner && added === 0 && noChangeCount >= 2) {
-        // 沒有 Spinner 且滾動無新內容，已到達清單尾端
-        break;
+        onProgress(videoMap.size, targetMax === Infinity ? 0 : targetMax);
       }
     }
 
-    console.log(`[YT-AI-Classifier] Scraping finished. Total collected: ${videoMap.size} videos.`);
+    console.log(`[YT-AI-Classifier] Scraping complete! Total collected: ${videoMap.size} videos.`);
     return Array.from(videoMap.values()).slice(0, targetMax);
   }
 
