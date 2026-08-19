@@ -33,6 +33,25 @@
     return hash;
   }
 
+  function cleanHtmlTags(str) {
+    if (!str) return '';
+    return str
+      .replace(/<[^>]*>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .trim();
+  }
+
+  function formatSecondsToDuration(sec) {
+    if (!sec || isNaN(sec)) return 'N/A';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  }
+
   // ==========================================================================
   // 1. YouTube 適配器 (YouTubeAdapter)
   // ==========================================================================
@@ -306,49 +325,93 @@
   };
 
   // ==========================================================================
-  // 2. Bilibili 適配器 (BilibiliAdapter)
+  // 2. Bilibili 適配器 (BilibiliAdapter - 支援 Direct API 與通用 DOM 雙引擎)
   // ==========================================================================
   const BilibiliAdapter = {
     platform: 'bilibili',
 
     isSupported() {
       const url = window.location.href;
-      const isFavlistUrl = url.includes('space.bilibili.com') && url.includes('/favlist');
-      const isMedialistUrl = url.includes('bilibili.com/medialist/play/') || url.includes('bilibili.com/list/ml');
+      const isFavlistUrl = url.includes('space.bilibili.com') && (url.includes('/favlist') || url.includes('/channel/collectiondetail') || url.includes('/channel/seriesdetail'));
+      const isMedialistUrl = url.includes('bilibili.com/medialist/play/') || url.includes('bilibili.com/list/ml') || url.includes('bilibili.com/video/');
       const hasBiliDom = !!(
         document.querySelector('.fav-video-list') ||
         document.querySelector('.fav-list-main') ||
         document.querySelector('.fav-main-section') ||
-        document.querySelector('.media-list-wrapper')
+        document.querySelector('.favList-content') ||
+        document.querySelector('.media-list-wrapper') ||
+        document.querySelector('a[href*="/video/BV"]')
       );
       return isFavlistUrl || isMedialistUrl || hasBiliDom;
     },
 
     getPlaylistTitle() {
+      // 1. 空間收藏夾標題
       const titleEl = document.querySelector('.fav-main-title') ||
                       document.querySelector('.fav-name') ||
                       document.querySelector('.cur-list .title') ||
                       document.querySelector('.fav-header .title') ||
-                      document.querySelector('.fav-list-main .fav-title');
+                      document.querySelector('.fav-list-main .fav-title') ||
+                      document.querySelector('.fav-item.cur .text') ||
+                      document.querySelector('.fav-item.active .text');
       if (titleEl) {
         const text = (titleEl.textContent || '').trim();
-        if (text) return text;
+        if (text) return cleanHtmlTags(text);
       }
 
+      // 2. 媒體播單頁面標題
       const mediaTitleEl = document.querySelector('.media-list-title') ||
                            document.querySelector('.nav-title .title') ||
                            document.querySelector('h1.video-title');
       if (mediaTitleEl) {
         const text = (mediaTitleEl.textContent || '').trim();
-        if (text) return text;
+        if (text) return cleanHtmlTags(text);
       }
 
+      // 3. Fallback Document Title
       const docTitle = document.title || '';
       return docTitle
         .replace(/_哔哩哔哩_bilibili$/i, '')
         .replace(/的个人空间-哔哩哔哩.*$/i, '')
         .replace(/- 哔哩哔哩.*$/i, '')
         .trim() || 'Bilibili 收藏夾';
+    },
+
+    /**
+     * 嘗試從當前網址或 DOM 中提取 B 站收藏夾的 media_id / fid
+     */
+    detectMediaId() {
+      const url = window.location.href;
+
+      // 1. URL 中的 fid (例: ?fid=12345678)
+      const fidMatch = url.match(/[?&]fid=(\d+)/);
+      if (fidMatch) return fidMatch[1];
+
+      // 2. URL 中的 ml (例: /medialist/play/ml12345678)
+      const mlMatch = url.match(/\/ml(\d+)/i);
+      if (mlMatch) return mlMatch[1];
+
+      // 3. DOM 當前選中項的 data-fid 或連結
+      const curFavItem = document.querySelector('.fav-item.cur, .fav-item.active, li.cur, .cur-list');
+      if (curFavItem) {
+        const dataFid = curFavItem.getAttribute('data-fid') || curFavItem.getAttribute('fid');
+        if (dataFid && /^\d+$/.test(dataFid)) return dataFid;
+
+        const linkWithFid = curFavItem.querySelector('a[href*="fid="]');
+        if (linkWithFid) {
+          const m = linkWithFid.href.match(/[?&]fid=(\d+)/);
+          if (m) return m[1];
+        }
+      }
+
+      // 4. 搜尋頁面上第一個 fid 連結
+      const anyFidLink = document.querySelector('a[href*="fid="]');
+      if (anyFidLink) {
+        const m = anyFidLink.href.match(/[?&]fid=(\d+)/);
+        if (m) return m[1];
+      }
+
+      return null;
     },
 
     detectTotalCount() {
@@ -369,109 +432,171 @@
       return null;
     },
 
-    extractVideoData(element) {
-      try {
-        const titleEl = element.querySelector('a.title') ||
-                        element.querySelector('.title a') ||
-                        element.querySelector('.title') ||
-                        element.querySelector('.video-name') ||
-                        element.querySelector('a[href*="/video/BV"]');
+    /**
+     * 引擎 1: 透過 Bilibili 官方非公開/公開資源 API 直接取得完整清單 (0 DOM 依賴，極速 100% 精準)
+     */
+    async fetchViaBilibiliAPI(mediaId, maxItems = 0, onProgress = null) {
+      const videoMap = new Map();
+      let page = 1;
+      const pageSize = 20;
+      let hasMore = true;
+      const targetMax = maxItems > 0 ? maxItems : Infinity;
 
-        if (!titleEl) return null;
+      console.log(`[BilibiliAdapter] Attempting direct API fetch for mediaId=${mediaId}, target=${targetMax}...`);
 
-        const rawTitle = (titleEl.getAttribute('title') || titleEl.textContent || '').trim();
-        if (!rawTitle) return null;
+      while (hasMore && videoMap.size < targetMax && page <= 50) {
+        const apiUrl = `https://api.bilibili.com/x/v3/fav/resource/list?media_id=${mediaId}&pn=${page}&ps=${pageSize}&keyword=&order=mtime&type=0&tid=0&platform=web`;
 
-        let href = titleEl.getAttribute('href') || '';
-        if (!href) {
-          const anyLink = element.querySelector('a.cover') ||
-                          element.querySelector('a[href*="/video/BV"]') ||
-                          element.querySelector('a');
-          if (anyLink) href = anyLink.getAttribute('href') || '';
+        try {
+          const response = await fetch(apiUrl, {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+              'Accept': 'application/json, text/plain, */*'
+            }
+          });
+
+          if (!response.ok) {
+            console.warn(`[BilibiliAdapter] API HTTP ${response.status}`);
+            break;
+          }
+
+          const resJson = await response.json();
+          if (resJson.code !== 0 || !resJson.data || !Array.isArray(resJson.data.medias)) {
+            console.warn('[BilibiliAdapter] API returned non-zero code or empty medias:', resJson);
+            break;
+          }
+
+          const medias = resJson.data.medias;
+          if (medias.length === 0) {
+            break;
+          }
+
+          medias.forEach((item) => {
+            const bvid = item.bvid || (item.id ? `av${item.id}` : '');
+            if (!bvid || videoMap.has(bvid)) return;
+
+            const title = cleanHtmlTags(item.title || '');
+            if (!title || title === '已失效视频' || title === '已删除视频') return;
+
+            const upperName = item.upper?.name || '未知 UP 主';
+            const durationText = formatSecondsToDuration(item.duration);
+            let thumbnail = item.cover || '';
+            if (thumbnail.startsWith('//')) thumbnail = `https:${thumbnail}`;
+
+            videoMap.set(bvid, {
+              id: bvid,
+              videoId: bvid,
+              bvid,
+              title,
+              channelTitle: upperName,
+              duration: durationText,
+              url: `https://www.bilibili.com/video/${bvid}`,
+              thumbnail,
+              platform: 'bilibili'
+            });
+          });
+
+          if (onProgress) {
+            onProgress(videoMap.size, targetMax === Infinity ? (resJson.data.info?.media_count || videoMap.size) : targetMax);
+          }
+
+          hasMore = resJson.data.has_more === true && medias.length >= pageSize;
+          page++;
+
+          // 輕微延遲防禦風控
+          if (hasMore && videoMap.size < targetMax) {
+            await sleep(350);
+          }
+        } catch (err) {
+          console.warn('[BilibiliAdapter] API request failed:', err);
+          break;
         }
-
-        let bvid = '';
-        if (href) {
-          const match = href.match(/(BV[a-zA-Z0-9]{10})/i);
-          if (match) bvid = match[1];
-        }
-
-        if (!bvid) {
-          bvid = `bili_${Math.abs(hashString(rawTitle))}`;
-        }
-
-        let channelTitle = '未知 UP 主';
-        const upEl = element.querySelector('.meta .up-name') ||
-                     element.querySelector('.author') ||
-                     element.querySelector('.up-name a') ||
-                     element.querySelector('.up-name') ||
-                     element.querySelector('a.up-name') ||
-                     element.querySelector('.meta .up') ||
-                     element.querySelector('.up-info');
-        if (upEl) {
-          const upText = (upEl.textContent || '').trim();
-          if (upText) channelTitle = upText;
-        }
-
-        let duration = '';
-        const durationEl = element.querySelector('.meta .length') ||
-                           element.querySelector('.length') ||
-                           element.querySelector('span.time') ||
-                           element.querySelector('span.duration') ||
-                           element.querySelector('.duration');
-        if (durationEl) {
-          duration = (durationEl.textContent || '').trim();
-        }
-
-        let thumbnail = '';
-        const imgEl = element.querySelector('img.cover') ||
-                      element.querySelector('img[src*="hdslb.com"]') ||
-                      element.querySelector('img');
-        if (imgEl) {
-          thumbnail = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || '';
-          if (thumbnail.startsWith('//')) thumbnail = `https:${thumbnail}`;
-        }
-
-        const fullUrl = bvid.startsWith('bili_')
-          ? window.location.href
-          : `https://www.bilibili.com/video/${bvid}`;
-
-        return {
-          id: bvid,
-          videoId: bvid,
-          bvid,
-          title: rawTitle,
-          channelTitle,
-          duration: duration || 'N/A',
-          url: fullUrl,
-          thumbnail,
-          platform: 'bilibili'
-        };
-      } catch (err) {
-        console.warn('[BilibiliAdapter] Error extracting video item:', err);
-        return null;
       }
+
+      console.log(`[BilibiliAdapter] API Fetch complete. Total videos: ${videoMap.size}`);
+      return Array.from(videoMap.values()).slice(0, targetMax);
     },
 
+    /**
+     * 引擎 2: 通用 DOM 鏈結與卡片爬蟲 (備援方案)
+     */
     scrapeVisibleVideos(videoMap) {
       let newlyAdded = 0;
-      const selectors = [
-        '.fav-video-list li',
-        '.fav-video-list .small-item',
-        '.fav-list-main .fav-video-list-item',
-        '.fav-video-list-item',
-        'li.small-item',
-        '.media-list-wrapper .video-item',
-        '#playlist-list .video-item'
-      ];
 
-      const elements = document.querySelectorAll(selectors.join(', '));
+      // 搜尋頁面上所有帶有 /video/BV 或 /video/av 的超連結
+      const links = document.querySelectorAll(
+        'a[href*="/video/BV"], a[href*="/video/av"], a.cover[href*="/video/"], a.title[href*="/video/"]'
+      );
 
-      elements.forEach((el) => {
-        const data = this.extractVideoData(el);
-        if (data && data.videoId && !videoMap.has(data.videoId)) {
-          videoMap.set(data.videoId, data);
+      links.forEach((link) => {
+        try {
+          const href = link.getAttribute('href') || link.href || '';
+          const match = href.match(/(BV[a-zA-Z0-9]{10})/i) || href.match(/\/video\/(av\d+)/i);
+          if (!match) return;
+
+          const bvid = match[1];
+          if (videoMap.has(bvid)) return;
+
+          // 尋找卡片外層容器
+          const card = link.closest(
+            'li, .small-item, .fav-video-list-item, .bili-video-card, .video-item, .fav-list-item, .space_favList__item, .fav-video-card'
+          ) || link.parentElement?.parentElement || link.parentElement || link;
+
+          // 標題提取
+          const titleEl = card.querySelector('a.title, .title, .bili-video-card__info--tit, a[title], .video-name, h3, .name') || link;
+          let rawTitle = (titleEl.getAttribute('title') || titleEl.textContent || '').trim();
+          if (!rawTitle) {
+            const imgAlt = card.querySelector('img[alt]')?.getAttribute('alt');
+            if (imgAlt) rawTitle = imgAlt.trim();
+          }
+          rawTitle = cleanHtmlTags(rawTitle);
+
+          if (!rawTitle || rawTitle.toLowerCase() === 'deleted' || rawTitle === '已失效视频' || rawTitle === '已删除视频') {
+            return;
+          }
+
+          // UP主提取
+          let channelTitle = '未知 UP 主';
+          const upEl = card.querySelector(
+            '.up-name, .author, .bili-video-card__info--author, a[href*="space.bilibili.com"], .meta .up-name, .up, .up-info, .name a'
+          );
+          if (upEl) {
+            const upText = (upEl.textContent || '').trim();
+            if (upText) channelTitle = cleanHtmlTags(upText);
+          }
+
+          // 時長提取
+          let duration = '';
+          const durationEl = card.querySelector(
+            '.length, .duration, .time, .bili-video-card__stats__duration, span.duration, span.time'
+          );
+          if (durationEl) {
+            duration = (durationEl.textContent || '').trim();
+          }
+
+          // 封面圖
+          let thumbnail = '';
+          const imgEl = card.querySelector('img.cover, img[src*="hdslb.com"], img[data-src], img');
+          if (imgEl) {
+            thumbnail = imgEl.src || imgEl.getAttribute('data-src') || '';
+            if (thumbnail.startsWith('//')) thumbnail = `https:${thumbnail}`;
+          }
+
+          videoMap.set(bvid, {
+            id: bvid,
+            videoId: bvid,
+            bvid,
+            title: rawTitle,
+            channelTitle,
+            duration: duration || 'N/A',
+            url: `https://www.bilibili.com/video/${bvid}`,
+            thumbnail,
+            platform: 'bilibili'
+          });
           newlyAdded++;
+        } catch (e) {
+          console.warn('[BilibiliAdapter] Error parsing DOM node:', e);
         }
       });
 
@@ -479,13 +604,33 @@
     },
 
     async scrapeAllVideos(maxItems = 0, onProgress = null) {
+      const targetMax = maxItems > 0 ? maxItems : Infinity;
+
+      // ----------------------------------------------------------------------
+      // 策略 1: 優先嘗試直接呼叫 Bilibili 官方 API (極速、零 DOM 依賴、100% 穩定)
+      // ----------------------------------------------------------------------
+      const mediaId = this.detectMediaId();
+      if (mediaId) {
+        console.log(`[BilibiliAdapter] Detected mediaId=${mediaId}, running Direct API engine...`);
+        const apiVideos = await this.fetchViaBilibiliAPI(mediaId, maxItems, onProgress);
+        if (apiVideos && apiVideos.length > 0) {
+          return apiVideos;
+        }
+      }
+
+      // ----------------------------------------------------------------------
+      // 策略 2: 若未找到 mediaId 或 API 失敗，使用通用 DOM 翻頁與滾動爬蟲
+      // ----------------------------------------------------------------------
+      console.log('[BilibiliAdapter] Falling back to Universal DOM scraping engine...');
       const videoMap = new Map();
-      const detectedTotal = this.detectTotalCount();
-      const targetMax = maxItems > 0 ? maxItems : (detectedTotal || Infinity);
 
-      console.log('[BilibiliAdapter] Starting Bilibili favorites scraping. Target:', targetMax);
+      // 先等待 DOM 非同步渲染完成 (最多輪詢 3 秒)
+      for (let poll = 0; poll < 10; poll++) {
+        this.scrapeVisibleVideos(videoMap);
+        if (videoMap.size > 0) break;
+        await sleep(300);
+      }
 
-      this.scrapeVisibleVideos(videoMap);
       if (onProgress) {
         onProgress(videoMap.size, targetMax === Infinity ? 0 : targetMax);
       }
@@ -495,7 +640,7 @@
       }
 
       let currentPage = 1;
-      const maxPages = 100;
+      const maxPages = 50;
       let consecutiveEmptyPages = 0;
 
       while (videoMap.size < targetMax && currentPage < maxPages) {
@@ -505,7 +650,9 @@
                         document.querySelector('li.be-pager-next:not(.be-pager-disabled)');
 
         if (!nextBtn) {
+          // 若無下一頁按鈕，向下滾動
           window.scrollTo(0, document.documentElement.scrollHeight);
+          window.scrollBy({ top: 1500, behavior: 'smooth' });
           await randomDelay(800, 1200);
           const added = this.scrapeVisibleVideos(videoMap);
 
@@ -516,7 +663,7 @@
           if (added === 0) {
             consecutiveEmptyPages++;
             if (consecutiveEmptyPages >= 3) {
-              console.log('[BilibiliAdapter] Reached the end of Bilibili favorites list.');
+              console.log('[BilibiliAdapter] Reached the end of Bilibili favorites DOM.');
               break;
             }
           } else {
@@ -525,11 +672,11 @@
           continue;
         }
 
-        console.log(`[BilibiliAdapter] Navigating to page ${currentPage + 1}...`);
+        console.log(`[BilibiliAdapter] DOM clicking page ${currentPage + 1}...`);
         nextBtn.click();
         currentPage++;
 
-        // 防風控隨機擬人化延遲 (800ms ～ 1500ms)
+        // 🚨 防風控隨機擬人化延遲 (800ms ～ 1500ms)
         await randomDelay(800, 1500);
 
         const added = this.scrapeVisibleVideos(videoMap);
@@ -547,7 +694,7 @@
         }
       }
 
-      console.log(`[BilibiliAdapter] Scraping complete! Total collected: ${videoMap.size} videos.`);
+      console.log(`[BilibiliAdapter] DOM Scraping complete! Total: ${videoMap.size} videos.`);
       return Array.from(videoMap.values()).slice(0, targetMax);
     },
 
