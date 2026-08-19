@@ -627,7 +627,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   // 結果渲染 (卡片手風琴與摘要)
   // ==========================================
-  function renderResults(categorizedResults, totalVideos, model) {
+  function renderResults(categorizedResults, totalVideos, model, openCategories = null) {
     let results = categorizedResults;
     let total = totalVideos;
     let modelName = model;
@@ -664,12 +664,20 @@ document.addEventListener('DOMContentLoaded', () => {
       return (results[b] || []).length - (results[a] || []).length;
     });
 
+    const allCategoryNames = Object.keys(results);
+
     sortedCategories.forEach((catName, index) => {
       const catVideos = results[catName] || [];
       if (!Array.isArray(catVideos) || catVideos.length === 0) return;
 
       const color = BADGE_COLORS[index % BADGE_COLORS.length];
-      const card = createCategoryCard(catName, catVideos, color);
+      const card = createCategoryCard(catName, catVideos, color, allCategoryNames);
+
+      // 若指定要開啟的分類，自動加上 open class
+      if (openCategories && openCategories.has(catName)) {
+        card.classList.add('open');
+      }
+
       categoriesList.appendChild(card);
     });
 
@@ -677,7 +685,7 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleAllAccordionBtn.textContent = '全部展開';
   }
 
-  function createCategoryCard(categoryName, videos, color) {
+  function createCategoryCard(categoryName, videos, color, allCategoryNames = []) {
     const card = document.createElement('div');
     card.className = 'category-card';
     card.setAttribute('data-category', categoryName);
@@ -760,6 +768,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const body = document.createElement('div');
     body.className = 'category-body';
 
+    // 取得所有可用分類名單
+    const targetCategories = (allCategoryNames && allCategoryNames.length > 0)
+      ? allCategoryNames
+      : Object.keys(currentCachedTask?.categorizedResults || {});
+
     videos.forEach((v, idx) => {
       const item = document.createElement('a');
       item.className = 'video-item';
@@ -767,6 +780,17 @@ document.addEventListener('DOMContentLoaded', () => {
       item.target = '_blank';
       item.title = `點擊在 YouTube 開啟: ${v.title}`;
       
+      const durationHtml = (v.duration && v.duration !== 'N/A')
+        ? `<span class="video-duration">⏱️ ${escapeHtml(v.duration)}</span>`
+        : '';
+
+      // 構建分類切換下拉選項
+      let optionsHtml = '';
+      targetCategories.forEach(cat => {
+        optionsHtml += `<option value="${escapeHtml(cat)}" ${cat === categoryName ? 'selected' : ''}>📁 ${escapeHtml(cat)}</option>`;
+      });
+      optionsHtml += `<option value="__NEW_CATEGORY__">➕ 新建分類...</option>`;
+
       item.innerHTML = `
         <div class="video-main">
           <div class="video-title">${idx + 1}. ${escapeHtml(v.title)}</div>
@@ -774,10 +798,30 @@ document.addEventListener('DOMContentLoaded', () => {
             <span>👤 ${escapeHtml(v.channelTitle)}</span>
           </div>
         </div>
-        ${v.duration && v.duration !== 'N/A' ? `<span class="video-duration">⏱️ ${escapeHtml(v.duration)}</span>` : ''}
+        <div class="video-right-meta">
+          ${durationHtml}
+          <select class="video-category-select" title="移至其他分類">
+            ${optionsHtml}
+          </select>
+        </div>
       `;
 
+      // 下拉選單事件綁定
+      const selectEl = item.querySelector('.video-category-select');
+      if (selectEl) {
+        selectEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+        });
+
+        selectEl.addEventListener('change', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          handleMoveVideoCategory(v, categoryName, selectEl.value, selectEl);
+        });
+      }
+
       item.addEventListener('click', (e) => {
+        if (e.target.closest('.video-category-select')) return;
         e.preventDefault();
         chrome.tabs.create({ url: v.url });
       });
@@ -794,6 +838,67 @@ document.addEventListener('DOMContentLoaded', () => {
     card.appendChild(header);
     card.appendChild(body);
     return card;
+  }
+
+  /**
+   * 輕量影片分類微調處理函式 (即時遷移 + 自動持久化)
+   */
+  function handleMoveVideoCategory(video, sourceCategory, selectedValue, selectElement) {
+    let targetCategory = selectedValue;
+
+    if (selectedValue === '__NEW_CATEGORY__') {
+      const userInput = prompt('請輸入新建分類名稱：');
+      if (!userInput || !userInput.trim()) {
+        selectElement.value = sourceCategory;
+        return;
+      }
+      targetCategory = userInput.trim();
+    }
+
+    if (targetCategory === sourceCategory) {
+      selectElement.value = sourceCategory;
+      return;
+    }
+
+    if (!currentCachedTask || !currentCachedTask.categorizedResults) return;
+
+    const results = currentCachedTask.categorizedResults;
+
+    // 1. 從原分類移除
+    const srcList = results[sourceCategory] || [];
+    const videoIndex = srcList.findIndex(item => 
+      (item.videoId && item.videoId === video.videoId) || 
+      (item.url && item.url === video.url) || 
+      item.title === video.title
+    );
+    if (videoIndex !== -1) {
+      srcList.splice(videoIndex, 1);
+    }
+
+    // 2. 加入目標分類
+    if (!results[targetCategory]) {
+      results[targetCategory] = [];
+    }
+    const updatedVideo = { ...video, category: targetCategory };
+    results[targetCategory].push(updatedVideo);
+
+    // 3. 記錄當前所有展開的卡片，並自動展開目標分類卡片
+    const openCards = new Set();
+    document.querySelectorAll('.category-card.open').forEach(c => {
+      const name = c.getAttribute('data-category');
+      if (name) openCards.add(name);
+    });
+    openCards.add(targetCategory);
+
+    // 4. 持久化至 chrome.storage.local
+    currentCachedTask.categorizedResults = results;
+    chrome.storage.local.set({ currentTask: currentCachedTask }, () => {
+      console.log(`[Popup] Video moved from "${sourceCategory}" to "${targetCategory}"`);
+    });
+
+    // 5. 重新渲染
+    renderResults(results, currentCachedTask.totalVideos, currentCachedTask.model, openCards);
+    showToast(`已將影片移至「${targetCategory}」`);
   }
 
   // ==========================================

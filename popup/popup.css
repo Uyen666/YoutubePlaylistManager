@@ -852,12 +852,54 @@ body {
   color: var(--text-muted);
 }
 
+.video-right-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .video-duration {
   font-size: 10px;
   background: rgba(0, 0, 0, 0.4);
   padding: 1px 4px;
   border-radius: 3px;
   color: #cbd5e1;
+  white-space: nowrap;
+}
+
+.video-category-select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-secondary);
+  font-size: 10px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+  max-width: 96px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.video-category-select:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent-indigo);
+  color: #ffffff;
+}
+
+.video-category-select:focus {
+  border-color: var(--accent-indigo);
+  background: var(--bg-secondary);
+  color: #ffffff;
+}
+
+.video-category-select option {
+  background: #1e293b;
+  color: #f8fafc;
+  font-size: 11px;
 }
 
 /* 匯出工具列 */
