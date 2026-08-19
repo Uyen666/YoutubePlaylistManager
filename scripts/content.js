@@ -144,26 +144,38 @@
   }
 
   /**
-   * 掃描當前 DOM 中的所有影片 (相容公開、不公開、分享清單與最新版 YouTube 結構)
+   * 掃描當前 DOM 中的所有影片 (嚴格限定在播放清單專屬容器內，杜絕抓取到推薦影片)
    * @param {Map<string, Object>} videoMap - 已存在的影片 Map
    * @returns {number} 本次新加入的影片數量
    */
   function scrapeVisibleVideos(videoMap) {
     let newlyAdded = 0;
-    const selectors = [
-      'ytd-playlist-video-renderer',
-      'ytd-playlist-panel-video-renderer',
-      'ytd-item-section-renderer ytd-playlist-video-renderer',
-      'ytd-rich-item-renderer ytd-video-renderer',
-      'ytd-video-renderer',
-      'ytd-grid-video-renderer',
-      'yt-lockup-view-model',
-      '#contents > ytd-playlist-video-renderer',
-      '#contents > ytd-rich-item-renderer',
-      'ytd-playlist-video-list-renderer ytd-playlist-video-renderer'
-    ];
+    const isWatchPage = window.location.pathname.includes('/watch');
+    let elements = [];
 
-    const elements = document.querySelectorAll(selectors.join(', '));
+    if (isWatchPage) {
+      // 情況 1：在影片播放頁中 (/watch?v=...&list=...)
+      // 🚨 嚴格鎖定右側播放清單面板，絕不抓取播放器下方的「推薦影片」與「相關影片」！
+      const panel = document.querySelector('ytd-playlist-panel-renderer #items') ||
+                    document.querySelector('ytd-playlist-panel-renderer') ||
+                    document.querySelector('#playlist #items');
+      if (panel) {
+        elements = Array.from(panel.querySelectorAll('ytd-playlist-panel-video-renderer'));
+      }
+    } else {
+      // 情況 2：在專屬播放清單頁面中 (/playlist?list=...)
+      // 🚨 嚴格鎖定播放清單的主內容容器，排除側邊欄的推薦頻道或相關清單！
+      const container = document.querySelector('ytd-playlist-video-list-renderer #contents') ||
+                        document.querySelector('ytd-playlist-video-list-renderer') ||
+                        document.querySelector('#contents.ytd-playlist-video-list-renderer') ||
+                        document.querySelector('ytd-browse[page-subtype="playlist"] #contents');
+      if (container) {
+        elements = Array.from(container.querySelectorAll('ytd-playlist-video-renderer, ytd-item-section-renderer ytd-playlist-video-renderer, yt-lockup-view-model'));
+      } else {
+        // 備援：僅尋找標準的 ytd-playlist-video-renderer 節點
+        elements = Array.from(document.querySelectorAll('ytd-playlist-video-renderer'));
+      }
+    }
 
     elements.forEach((el) => {
       const data = extractVideoData(el);
