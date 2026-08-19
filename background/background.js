@@ -68,6 +68,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; // 保持非同步通道開啟
   }
 
+  if (request.action === 'START_QUICK_EXTRACT') {
+    handleStartQuickExtract(request)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true; // 保持非同步通道開啟
+  }
+
   if (request.action === 'CANCEL_ANALYSIS') {
     currentCancelToken = true;
     isTaskRunning = false;
@@ -99,12 +106,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const current = request.currentCount || 0;
     const target = request.target || 0;
     const targetText = target === Infinity ? '全部' : target;
-    const percent = Math.min(40, Math.round((current / (target === Infinity ? current + 20 : target)) * 40));
-    updateTaskState({
-      status: 'scraping',
-      progressPercent: percent,
-      statusTitle: '步驟 1/2: 正在滾動網頁擷取影片...',
-      statusDetail: `已發現 ${current} 部影片 (目標: ${targetText})`
+    
+    chrome.storage.local.get(['currentTask'], (res) => {
+      const isQuick = res.currentTask?.model === '純擷取 (0 Token)';
+      const maxPercent = isQuick ? 90 : 40;
+      const stepLabel = isQuick ? '正在背景滾動網頁擷取影片...' : '步驟 1/2: 正在滾動網頁擷取影片...';
+      const percent = Math.min(maxPercent, Math.round((current / (target === Infinity ? current + 20 : target)) * maxPercent));
+      updateTaskState({
+        status: 'scraping',
+        progressPercent: percent,
+        statusTitle: stepLabel,
+        statusDetail: `已發現 ${current} 部影片 (目標: ${targetText})`
+      });
     });
   }
 });
@@ -259,6 +272,117 @@ async function handleStartAnalysis(params) {
     if (err.message !== '任務已被使用者取消') {
       sendDesktopNotification(
         '⚠️ YouTube 清單分類中斷',
+        `中斷原因: ${err.message}`,
+        true
+      );
+    }
+
+    return { success: false, error: err.message };
+  } finally {
+    isTaskRunning = false;
+  }
+}
+
+/**
+ * 背景快速純擷取流程：擷取 DOM ➔ 0 Token 直接儲存 ➔ 持久化
+ */
+async function handleStartQuickExtract(params) {
+  const { tabId, playlistUrl, playlistTitle, maxItems, platform } = params;
+  const isBilibili = platform === 'bilibili' || (playlistUrl && playlistUrl.includes('bilibili.com'));
+  const platformName = isBilibili ? 'Bilibili 收藏夾' : 'YouTube 播放清單';
+
+  if (isTaskRunning) {
+    console.warn('[YT-AI-Classifier:Background] Task already running, ignoring duplicate request.');
+    return { success: false, message: '已有任務在進行中，請等待完成' };
+  }
+
+  isTaskRunning = true;
+  currentCancelToken = false;
+
+  await updateTaskState({
+    status: 'scraping',
+    playlistUrl,
+    playlistTitle,
+    platform: platform || (isBilibili ? 'bilibili' : 'youtube'),
+    progressPercent: 10,
+    statusTitle: `正在背景擷取 ${platformName}...`,
+    statusDetail: '啟動自動滾動爬蟲 (0 Token 消耗)...',
+    categorizedResults: {},
+    totalVideos: 0,
+    model: '純擷取 (0 Token)',
+    error: null
+  });
+
+  try {
+    console.log(`[YT-AI-Classifier:Background] Quick Extract tabId=${tabId}, maxItems=${maxItems}`);
+
+    let scrapeRes = null;
+    try {
+      scrapeRes = await chrome.tabs.sendMessage(tabId, {
+        action: 'SCRAPE_PLAYLIST',
+        maxItems: Number(maxItems) || 0
+      });
+    } catch (_) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['scripts/content.js']
+      });
+      await new Promise(r => setTimeout(r, 400));
+      scrapeRes = await chrome.tabs.sendMessage(tabId, {
+        action: 'SCRAPE_PLAYLIST',
+        maxItems: Number(maxItems) || 0
+      });
+    }
+
+    if (currentCancelToken) throw new Error('任務已被使用者取消');
+
+    if (!scrapeRes || !scrapeRes.success || !scrapeRes.videos || scrapeRes.videos.length === 0) {
+      throw new Error(scrapeRes?.error || '未能擷取到任何影片，請確認播放清單是否有內容');
+    }
+
+    const scrapedVideos = scrapeRes.videos;
+    console.log(`[YT-AI-Classifier:Background] Scraped ${scrapedVideos.length} videos (Quick Extract).`);
+
+    const categorizedResults = {
+      '全部影片 (未分類)': scrapedVideos.map(v => ({
+        ...v,
+        category: '全部影片 (未分類)'
+      }))
+    };
+
+    await updateTaskState({
+      status: 'completed',
+      progressPercent: 100,
+      statusTitle: '擷取完成 (0 Token 消耗)',
+      statusDetail: `已成功擷取「${playlistTitle || platformName}」共 ${scrapedVideos.length} 部影片`,
+      categorizedResults,
+      categorizedVideos: scrapedVideos,
+      totalVideos: scrapedVideos.length,
+      platform: scrapeRes.platform || platform || (isBilibili ? 'bilibili' : 'youtube'),
+      model: '純擷取 (0 Token)',
+      completedAt: Date.now()
+    });
+
+    sendDesktopNotification(
+      `🎉 ${isBilibili ? 'B站' : 'YouTube'} 清單擷取完成 (0 Token)！`,
+      `已成功在背景擷取「${playlistTitle || platformName}」共 ${scrapedVideos.length} 部影片。點擊擴充功能即可查看成果！`
+    );
+
+    console.log('[YT-AI-Classifier:Background] Quick extraction completed and saved to storage.');
+    return { success: true };
+
+  } catch (err) {
+    console.error('[YT-AI-Classifier:Background] Quick Extract Error:', err);
+    await updateTaskState({
+      status: 'error',
+      statusTitle: '擷取發生錯誤',
+      statusDetail: err.message,
+      error: err.message
+    });
+
+    if (err.message !== '任務已被使用者取消') {
+      sendDesktopNotification(
+        `⚠️ ${isBilibili ? 'B站' : 'YouTube'} 清單擷取中斷`,
         `中斷原因: ${err.message}`,
         true
       );

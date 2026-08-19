@@ -384,16 +384,24 @@ document.addEventListener('DOMContentLoaded', () => {
       resultsSection.classList.add('hidden');
       progressSection.classList.remove('hidden');
       if (statusSpinner) statusSpinner.style.display = 'block';
-      progressBarFill.style.background = 'linear-gradient(90deg, var(--accent-indigo), var(--accent-purple), var(--accent-red))';
 
-      statusTitle.textContent = task.statusTitle || '分析進行中...';
+      const isQuick = task.model === '純擷取 (0 Token)';
+      if (isQuick) {
+        progressBarFill.style.background = 'linear-gradient(90deg, var(--accent-indigo), #10b981)';
+        if (btnTextSpan) btnTextSpan.textContent = '⏳ 背景擷取進行中...';
+      } else {
+        progressBarFill.style.background = 'linear-gradient(90deg, var(--accent-indigo), var(--accent-purple), var(--accent-red))';
+        if (btnTextSpan) btnTextSpan.textContent = '⏳ AI 分析進行中 (背景運行)...';
+      }
+
+      statusTitle.textContent = task.statusTitle || '任務進行中...';
       statusDetailText.textContent = task.statusDetail || '正在處理...';
       const percent = Math.min(100, Math.max(0, task.progressPercent || 0));
       progressPercent.textContent = `${percent}%`;
       progressBarFill.style.width = `${percent}%`;
 
       startAnalyzeBtn.disabled = true;
-      if (btnTextSpan) btnTextSpan.textContent = '⏳ AI 分析進行中 (背景運行)...';
+      if (quickExtractBtn) quickExtractBtn.disabled = true;
     } else if (task.status === 'completed') {
       // 完成狀態：隱藏進度條、直接渲染結果、恢復按鈕
       progressSection.classList.add('hidden');
@@ -402,6 +410,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (isTargetPlaylist) {
         startAnalyzeBtn.disabled = false;
+        if (quickExtractBtn) quickExtractBtn.disabled = false;
         if (btnTextSpan) btnTextSpan.textContent = '🚀 重新分析此播放清單';
       }
     } else if (task.status === 'error') {
@@ -415,6 +424,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (isTargetPlaylist) {
         startAnalyzeBtn.disabled = false;
+        if (quickExtractBtn) quickExtractBtn.disabled = false;
         if (btnTextSpan) btnTextSpan.textContent = '🚀 開始擷取並進行 AI 分類';
       }
     } else if (task.status === 'idle') {
@@ -425,6 +435,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (isTargetPlaylist) {
         startAnalyzeBtn.disabled = false;
+        if (quickExtractBtn) quickExtractBtn.disabled = false;
         if (btnTextSpan) btnTextSpan.textContent = '🚀 開始擷取並進行 AI 分類';
       }
     }
@@ -503,7 +514,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ==========================================
-  // 純擷取原始清單 (0 Token 消耗，直接匯出)
+  // 純擷取原始清單 (0 Token 消耗，背景執行)
   // ==========================================
   async function startQuickExtractFlow() {
     if (!currentTab || !isTargetPlaylist) {
@@ -523,78 +534,32 @@ document.addEventListener('DOMContentLoaded', () => {
     resultsSection.classList.add('hidden');
     progressSection.classList.remove('hidden');
     if (statusSpinner) statusSpinner.style.display = 'block';
-    statusTitle.textContent = '正在擷取原始播放清單...';
-    statusDetailText.textContent = '自動滾動載入清單中所有影片 (0 Token 消耗)...';
-    progressPercent.textContent = '20%';
-    progressBarFill.style.width = '20%';
+    statusTitle.textContent = '正在啟動背景擷取任務...';
+    statusDetailText.textContent = '自動滾動載入清單中所有影片 (背景運行，可關閉視窗)...';
+    progressPercent.textContent = '5%';
+    progressBarFill.style.width = '5%';
     progressBarFill.style.background = 'linear-gradient(90deg, var(--accent-indigo), #10b981)';
 
     try {
-      // 確保 Content Script 已注入
-      let response = null;
-      try {
-        response = await chrome.tabs.sendMessage(currentTab.id, {
-          action: 'SCRAPE_PLAYLIST',
-          maxItems
-        });
-      } catch (_) {
-        await chrome.scripting.executeScript({
-          target: { tabId: currentTab.id },
-          files: ['scripts/content.js']
-        });
-        await new Promise(r => setTimeout(r, 400));
-        response = await chrome.tabs.sendMessage(currentTab.id, {
-          action: 'SCRAPE_PLAYLIST',
-          maxItems
-        });
-      }
-
-      if (!response || !response.success || !response.videos || response.videos.length === 0) {
-        throw new Error(response?.error || '未能在目前網頁中擷取到任何影片');
-      }
-
-      const scrapedVideos = response.videos;
-      const playlistName = currentPlaylistTitle.textContent || '原始播放清單';
-
-      // 構建單一「全部影片 (未分類)」分類卡片
-      const categorizedResults = {
-        '全部影片 (未分類)': scrapedVideos.map(v => ({
-          ...v,
-          category: '全部影片 (未分類)'
-        }))
-      };
-
-      const rawTask = {
-        status: 'completed',
-        progressPercent: 100,
-        statusTitle: '擷取完成 (0 Token 消耗)',
-        statusDetail: `已成功擷取「${playlistName}」共 ${scrapedVideos.length} 部影片`,
+      const response = await chrome.runtime.sendMessage({
+        action: 'START_QUICK_EXTRACT',
+        tabId: currentTab.id,
         playlistUrl: currentTab.url,
-        playlistTitle: playlistName,
-        platform: response.platform || currentDetectedPlatform || 'youtube',
-        totalVideos: scrapedVideos.length,
-        categorizedResults,
-        categorizedVideos: scrapedVideos,
-        model: '純擷取 (0 Token)',
-        completedAt: Date.now()
-      };
+        playlistTitle: currentPlaylistTitle.textContent,
+        platform: currentDetectedPlatform,
+        maxItems
+      });
 
-      // 儲存至本地快取並渲染
-      await chrome.storage.local.set({ currentTask: rawTask });
-      currentCachedTask = rawTask;
-      progressSection.classList.add('hidden');
-      renderResults(rawTask.categorizedResults, rawTask.totalVideos, rawTask.model);
-      resultsSection.classList.remove('hidden');
-      showToast(`🎉 成功擷取 ${scrapedVideos.length} 部影片！可直接複製 Markdown、匯出 JSON 或 CSV！`);
-
+      if (response && !response.success && response.message) {
+        showToast(response.message);
+      }
     } catch (err) {
-      console.error('[Popup] Quick extract failed:', err);
-      showToast(`❌ 擷取失敗: ${err.message}`);
-      statusTitle.textContent = '擷取失敗';
+      console.error('[Popup] Quick extract start failed:', err);
+      showToast(`❌ 啟動失敗: ${err.message}`);
+      statusTitle.textContent = '啟動失敗';
       statusDetailText.textContent = err.message;
       if (statusSpinner) statusSpinner.style.display = 'none';
       progressBarFill.style.background = '#ef4444';
-    } finally {
       if (isTargetPlaylist) {
         startAnalyzeBtn.disabled = false;
         if (quickExtractBtn) quickExtractBtn.disabled = false;
@@ -774,11 +739,8 @@ document.addEventListener('DOMContentLoaded', () => {
       : Object.keys(currentCachedTask?.categorizedResults || {});
 
     videos.forEach((v, idx) => {
-      const item = document.createElement('a');
+      const item = document.createElement('div');
       item.className = 'video-item';
-      item.href = v.url;
-      item.target = '_blank';
-      item.title = `點擊在 YouTube 開啟: ${v.title}`;
       
       const durationHtml = (v.duration && v.duration !== 'N/A')
         ? `<span class="video-duration">⏱️ ${escapeHtml(v.duration)}</span>`
@@ -793,7 +755,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       item.innerHTML = `
         <div class="video-main">
-          <div class="video-title">${idx + 1}. ${escapeHtml(v.title)}</div>
+          <a class="video-title" href="${escapeHtml(v.url)}" target="_blank" title="點擊在分頁開啟: ${escapeHtml(v.title)}">${idx + 1}. ${escapeHtml(v.title)}</a>
           <div class="video-meta">
             <span>👤 ${escapeHtml(v.channelTitle)}</span>
           </div>
@@ -815,16 +777,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         selectEl.addEventListener('change', (e) => {
           e.stopPropagation();
-          e.preventDefault();
           handleMoveVideoCategory(v, categoryName, selectEl.value, selectEl);
         });
       }
 
-      item.addEventListener('click', (e) => {
-        if (e.target.closest('.video-category-select')) return;
-        e.preventDefault();
-        chrome.tabs.create({ url: v.url });
-      });
+      // 獨立標題超連結事件綁定
+      const titleLink = item.querySelector('.video-title');
+      if (titleLink) {
+        titleLink.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (v.url) {
+            chrome.tabs.create({ url: v.url });
+          }
+        });
+      }
 
       body.appendChild(item);
     });

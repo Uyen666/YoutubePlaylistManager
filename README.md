@@ -34,8 +34,9 @@ GitHub 儲存庫：[https://github.com/Uyen666/YoutubePlaylistManager](https://g
    - 自動在 YouTube 帳號模擬建立全新播放清單、設定自訂隱私度（私人 / 不公開 / 公開）。
    - 智慧定位影片 DOM 節點，批次自動勾選並加入該分類的所有影片。
 
-5. **⚡ 0 Token 快速純擷取（免 API Key 快速備份）**：
+5. **⚡ 0 Token 快速純擷取（背景執行 & 免 API Key 快速備份）**：
    - 提供「**⚡ 僅擷取 (0 Token 匯出)**」功能，無須消耗任何 AI Tokens 或填寫 API Key。
+   - 支援**獨立背景服務 (Background Service Worker)** 執行，關閉 Popup 視窗依然持續滾動載入，完成後發送桌面通知。
    - 秒級自動滾動載入完整清單的所有影片，並一鍵匯出為 **Markdown 報表、JSON 或 CSV** 試算表。
 
 6. **📂 支援 JSON / CSV 檔案直接匯入（0 Token 消耗）**：
