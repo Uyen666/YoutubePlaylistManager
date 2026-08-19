@@ -147,9 +147,12 @@
         <div class="progress-bar-bg">
           <div id="progressBarFill" class="progress-bar-fill"></div>
         </div>
-        <div class="status-detail">
-          <div class="spinner"></div>
-          <span id="statusDetailText">正在初始化...</span>
+        <div class="status-detail-row">
+          <div class="status-detail">
+            <div id="statusSpinner" class="spinner"></div>
+            <span id="statusDetailText">正在初始化...</span>
+          </div>
+          <button id="cancelTaskBtn" class="btn-text-only btn-cancel" title="取消當前任務">⏹️ 取消</button>
         </div>
       </section>
 
@@ -171,8 +174,11 @@
         </div>
 
         <div class="results-toolbar">
-          <span class="results-header-text">📂 分類結果 (點擊展開/收合)</span>
-          <button id="toggleAllAccordionBtn" class="btn-text-only">全部展開</button>
+          <span class="results-header-text">📂 分類結果</span>
+          <div class="results-toolbar-actions">
+            <button id="clearResultsBtn" class="btn-text-only" title="清除結果">🗑️ 清除</button>
+            <button id="toggleAllAccordionBtn" class="btn-text-only">全部展開</button>
+          </div>
         </div>
 
         <!-- 分類卡片清單 (動態生成) -->

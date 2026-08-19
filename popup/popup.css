@@ -506,12 +506,31 @@ body {
   transition: width 0.3s ease;
 }
 
+.status-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .status-detail {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 11px;
   color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-cancel {
+  color: #ef4444;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.btn-cancel:hover {
+  color: #f87171;
 }
 
 .spinner {
@@ -521,6 +540,7 @@ body {
   border-top-color: var(--accent-indigo);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
 }
 
 @keyframes spin {
@@ -573,6 +593,12 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.results-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .results-header-text {

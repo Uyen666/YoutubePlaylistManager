@@ -1,6 +1,6 @@
 /**
  * YouTube 播放清單 AI 分類器 - Popup 控制腳本 (popup/popup.js)
- * 負責頁面狀態偵測、DOM 爬蟲通訊、Gemini / OpenAI API 批次分類、UI 互動與報表匯出
+ * 負責頁面狀態偵測、背景任務狀態同步、UI 互動與報表匯出
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -35,6 +35,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const progressPercent = document.getElementById('progressPercent');
   const progressBarFill = document.getElementById('progressBarFill');
   const statusDetailText = document.getElementById('statusDetailText');
+  const statusSpinner = document.getElementById('statusSpinner');
+  const cancelTaskBtn = document.getElementById('cancelTaskBtn');
 
   // 結果展示區
   const resultsSection = document.getElementById('resultsSection');
@@ -43,6 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const statModelUsed = document.getElementById('statModelUsed');
   const categoriesList = document.getElementById('categoriesList');
   const toggleAllAccordionBtn = document.getElementById('toggleAllAccordionBtn');
+  const clearResultsBtn = document.getElementById('clearResultsBtn');
 
   // 匯出按鈕
   const copyMarkdownBtn = document.getElementById('copyMarkdownBtn');
@@ -57,10 +60,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   let currentTab = null;
   let isTargetPlaylist = false;
-  let scrapedVideos = [];
-  let categorizedResults = {}; // { [categoryName]: [video1, video2, ...] }
-  let isProcessing = false;
   let allExpanded = false;
+  let currentCachedTask = null;
 
   const DEFAULT_CATEGORIES = '程式開發, 投資理財, 流行音樂, 遊戲動漫, 生活雜談, 其他';
 
@@ -79,6 +80,7 @@ document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
     await loadSettings();
     await checkCurrentTab();
+    await syncTaskState();
   }
 
   // ==========================================
@@ -125,6 +127,16 @@ document.addEventListener('DOMContentLoaded', () => {
     // 開始分析按鈕
     startAnalyzeBtn.addEventListener('click', startAnalysisFlow);
 
+    // 取消當前任務按鈕
+    if (cancelTaskBtn) {
+      cancelTaskBtn.addEventListener('click', cancelTaskFlow);
+    }
+
+    // 清除結果按鈕
+    if (clearResultsBtn) {
+      clearResultsBtn.addEventListener('click', clearTaskResultsFlow);
+    }
+
     // 全部展開/收合
     toggleAllAccordionBtn.addEventListener('click', () => {
       allExpanded = !allExpanded;
@@ -138,17 +150,10 @@ document.addEventListener('DOMContentLoaded', () => {
     exportJsonBtn.addEventListener('click', exportAsJson);
     exportCsvBtn.addEventListener('click', exportAsCsv);
 
-    // 監聽來自 content script 的即時滾動進度訊息
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message.action === 'SCRAPE_PROGRESS' && isProcessing) {
-        const current = message.currentCount || 0;
-        const target = message.target || 0;
-        const targetText = target === Infinity ? '全部' : target;
-        updateProgress(
-          '步驟 1/2: 正在滾動網頁擷取影片...',
-          `已發現 ${current} 部影片 (目標: ${targetText})`,
-          Math.min(40, (current / (target === Infinity ? current + 20 : target)) * 40)
-        );
+    // 核心：監聽 storage 變更以達成背景即時同步
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName === 'local' && changes.currentTask) {
+        handleTaskStateUpdate(changes.currentTask.newValue);
       }
     });
   }
@@ -160,7 +165,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return new Promise((resolve) => {
       chrome.storage.local.get(['provider', 'customModel', 'apiKey', 'categories', 'maxItems'], (result) => {
         let provider = result.provider || 'gemini-3.6-flash';
-        // 若儲存為已下架的 gemini-2.0-flash，自動升級為 gemini-3.6-flash
         if (provider === 'gemini-2.0-flash') {
           provider = 'gemini-3.6-flash';
           chrome.storage.local.set({ provider: 'gemini-3.6-flash' });
@@ -279,7 +283,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function setPlaylistReadyState(title) {
     isTargetPlaylist = true;
     pageAlert.classList.add('hidden');
-    startAnalyzeBtn.disabled = false;
+    // 如果目前沒有正在進行的任務，啟用開始分析按鈕
+    if (!currentCachedTask || (currentCachedTask.status !== 'scraping' && currentCachedTask.status !== 'classifying')) {
+      startAnalyzeBtn.disabled = false;
+    }
     currentPlaylistTitle.textContent = cleanTitle(title);
     currentPlaylistTitle.title = title;
   }
@@ -287,7 +294,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function setNotPlaylistState(customMsg) {
     isTargetPlaylist = false;
     pageAlert.classList.remove('hidden');
-    startAnalyzeBtn.disabled = true;
+    // 若沒有背景任務進行中，停用按鈕
+    if (!currentCachedTask || (currentCachedTask.status !== 'scraping' && currentCachedTask.status !== 'classifying')) {
+      startAnalyzeBtn.disabled = true;
+    }
     currentPlaylistTitle.textContent = customMsg || '未偵測到 YouTube 播放清單';
   }
 
@@ -296,9 +306,88 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ==========================================
-  // 主流程：擷取 DOM -> 批次 AI 分類 -> 渲染結果
+  // 背景任務狀態同步機制
+  // ==========================================
+  async function syncTaskState() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(['currentTask'], (result) => {
+        if (result.currentTask) {
+          handleTaskStateUpdate(result.currentTask);
+        }
+        resolve();
+      });
+    });
+  }
+
+  function handleTaskStateUpdate(task) {
+    if (!task) return;
+    currentCachedTask = task;
+
+    console.log('[Popup] Task State Update:', task.status, task);
+
+    const btnTextSpan = startAnalyzeBtn.querySelector('.btn-text');
+
+    if (task.status === 'scraping' || task.status === 'classifying') {
+      // 進行中狀態：顯示進度條、禁用按鈕
+      resultsSection.classList.add('hidden');
+      progressSection.classList.remove('hidden');
+      if (statusSpinner) statusSpinner.style.display = 'block';
+      progressBarFill.style.background = 'linear-gradient(90deg, var(--accent-indigo), var(--accent-purple), var(--accent-red))';
+
+      statusTitle.textContent = task.statusTitle || '分析進行中...';
+      statusDetailText.textContent = task.statusDetail || '正在處理...';
+      const percent = Math.min(100, Math.max(0, task.progressPercent || 0));
+      progressPercent.textContent = `${percent}%`;
+      progressBarFill.style.width = `${percent}%`;
+
+      startAnalyzeBtn.disabled = true;
+      if (btnTextSpan) btnTextSpan.textContent = '⏳ AI 分析進行中 (背景運行)...';
+    } else if (task.status === 'completed') {
+      // 完成狀態：隱藏進度條、直接渲染結果、恢復按鈕
+      progressSection.classList.add('hidden');
+      renderResults(task.categorizedResults, task.totalVideos, task.model);
+      resultsSection.classList.remove('hidden');
+
+      if (isTargetPlaylist) {
+        startAnalyzeBtn.disabled = false;
+        if (btnTextSpan) btnTextSpan.textContent = '🚀 重新分析此播放清單';
+      }
+    } else if (task.status === 'error') {
+      // 錯誤狀態
+      progressSection.classList.remove('hidden');
+      if (statusSpinner) statusSpinner.style.display = 'none';
+      statusTitle.textContent = '發生錯誤';
+      statusDetailText.textContent = task.error || task.statusDetail || '未知錯誤';
+      progressBarFill.style.background = '#ef4444';
+      progressPercent.textContent = '!';
+
+      if (isTargetPlaylist) {
+        startAnalyzeBtn.disabled = false;
+        if (btnTextSpan) btnTextSpan.textContent = '🚀 開始擷取並進行 AI 分類';
+      }
+    } else if (task.status === 'idle') {
+      // 空閒狀態
+      progressSection.classList.add('hidden');
+      if (!task.categorizedResults || Object.keys(task.categorizedResults).length === 0) {
+        resultsSection.classList.add('hidden');
+      }
+      if (isTargetPlaylist) {
+        startAnalyzeBtn.disabled = false;
+        if (btnTextSpan) btnTextSpan.textContent = '🚀 開始擷取並進行 AI 分類';
+      }
+    }
+  }
+
+  // ==========================================
+  // 啟動分析流程 (發送訊息給 Background 執行)
   // ==========================================
   async function startAnalysisFlow() {
+    // 檢查是否有進行中的任務
+    if (currentCachedTask && (currentCachedTask.status === 'scraping' || currentCachedTask.status === 'classifying')) {
+      showToast('⚠️ 任務已在背景進行中，請稍候');
+      return;
+    }
+
     const apiKey = apiKeyInput.value.trim();
     if (!apiKey) {
       settingsPanel.classList.remove('hidden');
@@ -319,484 +408,100 @@ document.addEventListener('DOMContentLoaded', () => {
       categoryList.push('其他');
     }
 
-    isProcessing = true;
+    const selectedProvider = providerSelect.value;
+    const customModelVal = customModelInput.value.trim();
+    const maxItems = parseInt(maxItemsSelect.value, 10) || 0;
+
     startAnalyzeBtn.disabled = true;
     resultsSection.classList.add('hidden');
     progressSection.classList.remove('hidden');
+    if (statusSpinner) statusSpinner.style.display = 'block';
+    statusTitle.textContent = '步驟 1/2: 正在啟動背景任務...';
+    statusDetailText.textContent = '初始化自動滾動爬蟲...';
+    progressPercent.textContent = '5%';
+    progressBarFill.style.width = '5%';
+    progressBarFill.style.background = 'linear-gradient(90deg, var(--accent-indigo), var(--accent-purple), var(--accent-red))';
 
     try {
-      // ----------------------------------------------------
-      // 階段 1: 擷取播放清單 DOM
-      // ----------------------------------------------------
-      updateProgress('步驟 1/2: 正在擷取播放清單...', '啟動自動滾動爬蟲...', 5);
-
-      const maxItems = parseInt(maxItemsSelect.value, 10) || 0;
-      const scrapeRes = await chrome.tabs.sendMessage(currentTab.id, {
-        action: 'SCRAPE_PLAYLIST',
-        maxItems
+      const response = await chrome.runtime.sendMessage({
+        action: 'START_ANALYSIS',
+        tabId: currentTab.id,
+        playlistUrl: currentTab.url,
+        playlistTitle: currentPlaylistTitle.textContent,
+        maxItems,
+        categories: categoryList,
+        provider: selectedProvider,
+        customModel: customModelVal,
+        apiKey
       });
 
-      if (!scrapeRes || !scrapeRes.success || !scrapeRes.videos || scrapeRes.videos.length === 0) {
-        throw new Error(scrapeRes?.error || '未能擷取到任何影片，請確認播放清單是否有內容');
+      if (response && !response.success && response.message) {
+        showToast(response.message);
       }
-
-      scrapedVideos = scrapeRes.videos;
-      console.log(`[Popup] Successfully scraped ${scrapedVideos.length} videos:`, scrapedVideos);
-
-      updateProgress(
-        '步驟 1/2: 網頁擷取完成！',
-        `共擷取 ${scrapedVideos.length} 部影片，準備進行 AI 分類...`,
-        40
-      );
-
-      // ----------------------------------------------------
-      // 階段 2: 批次呼叫 LLM 智慧分類
-      // ----------------------------------------------------
-      const selectedProvider = providerSelect.value;
-      const customModelVal = customModelInput.value.trim();
-      const effectiveModel = selectedProvider === 'custom' ? (customModelVal || 'gemini-3.6-flash') : selectedProvider;
-
-      const categorizedVideos = await classifyVideosWithLLM(
-        scrapedVideos,
-        categoryList,
-        effectiveModel,
-        apiKey,
-        (batchIndex, totalBatches, percent) => {
-          updateProgress(
-            `步驟 2/2: AI 分類中 (批次 ${batchIndex}/${totalBatches})...`,
-            `正在使用 ${getProviderDisplayName(selectedProvider, customModelVal)} 分析影片內容...`,
-            40 + Math.round(percent * 0.55)
-          );
-        }
-      );
-
-      // ----------------------------------------------------
-      // 階段 3: 分組並呈現結果
-      // ----------------------------------------------------
-      updateProgress('完成！', '整理分類報表中...', 100);
-      setTimeout(() => {
-        progressSection.classList.add('hidden');
-        renderResults(categorizedVideos, categoryList, selectedProvider);
-        resultsSection.classList.remove('hidden');
-        showToast('🎉 播放清單分類完成！');
-      }, 500);
-
     } catch (err) {
-      console.error('[Popup] Analysis Flow Error:', err);
-      showToast(`❌ 錯誤: ${err.message}`);
-      statusTitle.textContent = '發生錯誤';
+      console.error('[Popup] Failed to send START_ANALYSIS to background:', err);
+      showToast(`❌ 啟動失敗: ${err.message}`);
+      statusTitle.textContent = '啟動失敗';
       statusDetailText.textContent = err.message;
+      if (statusSpinner) statusSpinner.style.display = 'none';
       progressBarFill.style.background = '#ef4444';
-    } finally {
-      isProcessing = false;
       startAnalyzeBtn.disabled = false;
     }
   }
 
-  function updateProgress(title, detail, percent) {
-    statusTitle.textContent = title;
-    statusDetailText.textContent = detail;
-    progressPercent.textContent = `${Math.round(percent)}%`;
-    progressBarFill.style.width = `${percent}%`;
-  }
-
   // ==========================================
-  // LLM 分類引擎 (支援批次、指數退避與多層次容錯解析)
+  // 取消與清除操作
   // ==========================================
-  async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchProgress) {
-    const BATCH_SIZE = 25; // 每批 25 部影片
-    const totalBatches = Math.ceil(videos.length / BATCH_SIZE);
-    const results = [];
-
-    for (let i = 0; i < totalBatches; i++) {
-      const batchStart = i * BATCH_SIZE;
-      const batchVideos = videos.slice(batchStart, batchStart + BATCH_SIZE);
-
-      if (onBatchProgress) {
-        onBatchProgress(i + 1, totalBatches, (i / totalBatches) * 100);
-      }
-
-      // 提取精簡資訊給 LLM，節省 Token
-      const simplifiedList = batchVideos.map(v => ({
-        id: v.videoId,
-        title: v.title,
-        channel: v.channelTitle
-      }));
-
-      const classifiedBatch = await classifySingleBatchWithRetry(
-        simplifiedList,
-        categories,
-        model,
-        apiKey
-      );
-
-      console.log(`[Popup] Batch ${i + 1} Raw LLM Results:`, classifiedBatch);
-
-      // 多層次映射比對：
-      // 1. 建立 ID 映射表
-      // 2. 建立 Title 映射表
-      const classifiedMapById = new Map();
-      const classifiedMapByTitle = new Map();
-
-      if (Array.isArray(classifiedBatch)) {
-        classifiedBatch.forEach((item) => {
-          if (!item) return;
-          const assignedCat = findBestMatchingCategory(item.category, categories);
-          const keyId = item.id || item.videoId || item.video_id;
-          if (keyId) {
-            classifiedMapById.set(String(keyId).trim(), assignedCat);
-          }
-          if (item.title) {
-            classifiedMapByTitle.set(item.title.trim().toLowerCase(), assignedCat);
-          }
-        });
-      }
-
-      batchVideos.forEach((v, index) => {
-        let assignedCat = null;
-
-        // 優先 1: Video ID 比對
-        if (v.videoId && classifiedMapById.has(String(v.videoId).trim())) {
-          assignedCat = classifiedMapById.get(String(v.videoId).trim());
-        }
-
-        // 優先 2: 標題完全/模糊比對
-        if (!assignedCat && v.title && classifiedMapByTitle.has(v.title.trim().toLowerCase())) {
-          assignedCat = classifiedMapByTitle.get(v.title.trim().toLowerCase());
-        }
-
-        // 優先 3: 依回傳陣列的順序 Index 映射 (防止 LLM 竄改 ID 或未回傳 ID)
-        if (!assignedCat && Array.isArray(classifiedBatch) && classifiedBatch[index]) {
-          const itemAtIdx = classifiedBatch[index];
-          if (itemAtIdx && itemAtIdx.category) {
-            assignedCat = findBestMatchingCategory(itemAtIdx.category, categories);
-          }
-        }
-
-        // 最終備援：若真的無法比對才落入「其他」
-        if (!assignedCat) {
-          assignedCat = '其他';
-        }
-
-        results.push({
-          ...v,
-          category: assignedCat
-        });
-      });
-    }
-
-    if (onBatchProgress) {
-      onBatchProgress(totalBatches, totalBatches, 100);
-    }
-
-    return results;
-  }
-
-  /**
-   * 具備指數退避重試的單一批次分類函式
-   */
-  async function classifySingleBatchWithRetry(items, categories, model, apiKey, maxRetries = 3) {
-    let lastError = null;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        if (attempt > 0) {
-          const delayMs = Math.pow(2, attempt) * 1000 + Math.random() * 500;
-          console.warn(`[Popup] Retrying API request (Attempt ${attempt}/${maxRetries}) after ${Math.round(delayMs)}ms...`);
-          await new Promise(r => setTimeout(r, delayMs));
-        }
-
-        const isGemini = model.toLowerCase().includes('gemini');
-        if (isGemini) {
-          return await callGeminiAPI(items, categories, model, apiKey);
-        } else {
-          return await callOpenAIAPI(items, categories, model, apiKey);
-        }
-      } catch (err) {
-        lastError = err;
-        console.warn(`[Popup] API Attempt ${attempt + 1} failed:`, err.message);
-        // 如果是 API Key 錯誤 (401, 403)，不要重試，直接拋出
-        if (err.message.includes('API_KEY_INVALID') || err.message.includes('401') || err.message.includes('403') || err.message.includes('quota')) {
-          throw err;
-        }
-      }
-    }
-
-    if (lastError) {
-      throw new Error(`AI 分類失敗 (${lastError.message})，請檢查 API Key 或網路連線`);
-    }
-
-    return items.map(it => ({ id: it.id, category: '其他' }));
-  }
-
-  /**
-   * 智慧分類比對函式 (支援模糊比對、容錯與大小寫忽略)
-   */
-  function findBestMatchingCategory(rawCat, categories) {
-    if (!rawCat || typeof rawCat !== 'string') return '其他';
-    const cleanRaw = rawCat.trim().replace(/^[\d\.\-\s、：:•#*]+/g, '').trim();
-
-    // 1. 完全比對
-    if (categories.includes(cleanRaw)) return cleanRaw;
-
-    // 2. 忽略大小寫比對
-    const lowerRaw = cleanRaw.toLowerCase();
-    for (const cat of categories) {
-      if (cat.toLowerCase() === lowerRaw) return cat;
-    }
-
-    // 3. 包含比對 (例如 "前端程式開發" 包含 "程式開發", 或 cleanRaw 包含 category)
-    for (const cat of categories) {
-      if (cat === '其他') continue;
-      const lowerCat = cat.toLowerCase();
-      if (lowerRaw.includes(lowerCat) || lowerCat.includes(lowerRaw)) {
-        return cat;
-      }
-    }
-
-    // 4. 清除 emoji 與特殊符號後比對
-    const strippedRaw = cleanRaw.replace(/[^\w\u4e00-\u9fa5]/g, '').toLowerCase();
-    if (strippedRaw) {
-      for (const cat of categories) {
-        if (cat === '其他') continue;
-        const strippedCat = cat.replace(/[^\w\u4e00-\u9fa5]/g, '').toLowerCase();
-        if (strippedCat && (strippedRaw.includes(strippedCat) || strippedCat.includes(strippedRaw))) {
-          return cat;
-        }
-      }
-    }
-
-    return '其他';
-  }
-
-  /**
-   * 呼叫 Google Gemini API (支援 Structured Output JSON Schema)
-   */
-  async function callGeminiAPI(items, categories, model, apiKey) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-    const promptText = `
-你是一位精準的 YouTube 影片主題分類專家。
-你的任務是仔細閱讀待分類清單中每部影片的「標題 (title)」與「頻道名稱 (channel)」，將每部影片【積極且精準】地歸類至以下指定分類標籤之一。
-
-【指定可選分類標籤】：
-${categories.map(c => `• ${c}`).join('\n')}
-
-【分類重要指引】：
-1. 積極語意關聯：請深入分析影片標題中的關鍵字、主題、技術詞彙、活動類型或頻道專長，並選取最相符的分類標籤。
-2. 優先使用具體標籤：請盡最大努力歸入具體分類（例如：「程式開發」、「投資理財」、「流行音樂」等）。
-3. 「其他」使用限制：只有在影片資訊極度匱乏、標題亂碼、或完全無法與任何具體分類產生關聯時，才可選擇「其他」。請避免隨意將影片歸入「其他」。
-4. 必須嚴格使用【指定可選分類標籤】中完全一模一樣的字串名稱作為 category。
-
-【待分類影片清單】：
-${JSON.stringify(items, null, 2)}
-`;
-
-    const requestBody = {
-      contents: [
-        {
-          parts: [{ text: promptText }]
-        }
-      ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'OBJECT',
-          properties: {
-            results: {
-              type: 'ARRAY',
-              items: {
-                type: 'OBJECT',
-                properties: {
-                  id: { type: 'STRING' },
-                  category: {
-                    type: 'STRING',
-                    enum: categories
-                  }
-                },
-                required: ['id', 'category']
-              }
-            }
-          },
-          required: ['results']
-        },
-        temperature: 0.1
-      }
-    };
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody)
-    });
-
-    if (!response.ok) {
-      const errorJson = await response.json().catch(() => ({}));
-      const errorMsg = errorJson?.error?.message || `HTTP ${response.status} ${response.statusText}`;
-      throw new Error(`Gemini API 呼叫失敗: ${errorMsg}`);
-    }
-
-    const data = await response.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) {
-      throw new Error('Gemini API 未回傳有效內容，可能受到安全原則限制');
-    }
-
-    return safeParseClassificationJSON(rawText);
-  }
-
-  /**
-   * 呼叫 OpenAI API
-   */
-  async function callOpenAIAPI(items, categories, model, apiKey) {
-    const endpoint = 'https://api.openai.com/v1/chat/completions';
-
-    const systemPrompt = `你是一位精準的 YouTube 影片主題分類專家。
-你的任務是仔細閱讀待分類清單中每部影片的「標題 (title)」與「頻道名稱 (channel)」，將每部影片【積極且精準】地歸類至以下指定分類之一：${categories.join(', ')}。
-【分類原則】：
-1. 請積極分析影片語意與主題，優先歸入具體分類，切勿隨意使用「其他」。
-2. 只有在標題完全無意義或與所有分類毫無關聯時才填入「其他」。
-3. 必須回傳 JSON 物件，格式為: {"results": [{"id": "...", "category": "..."}]}`;
-
-    const userPrompt = `待分類影片清單：\n${JSON.stringify(items, null, 2)}`;
-
-    const requestBody = {
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.1
-    };
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(requestBody)
-    });
-
-    if (!response.ok) {
-      const errorJson = await response.json().catch(() => ({}));
-      const errorMsg = errorJson?.error?.message || `HTTP ${response.status} ${response.statusText}`;
-      throw new Error(`OpenAI API 呼叫失敗: ${errorMsg}`);
-    }
-
-    const data = await response.json();
-    const rawText = data?.choices?.[0]?.message?.content;
-    if (!rawText) {
-      throw new Error('OpenAI API 未回傳有效內容');
-    }
-
-    return safeParseClassificationJSON(rawText);
-  }
-
-  /**
-   * 安全解析 LLM 回傳的 JSON (支援前後雜訊過濾與正則備援)
-   */
-  function safeParseClassificationJSON(raw) {
-    if (!raw || typeof raw !== 'string') return [];
-    let clean = raw.trim();
-
-    // 移除 markdown code block (```json ... ``` 或 ``` ...)
-    clean = clean.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-
-    // 如果字串中前後包含雜訊文字，嘗試擷取最外層的 { ... } 或 [ ... ]
-    const firstBrace = clean.indexOf('{');
-    const firstBracket = clean.indexOf('[');
-    
-    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
-      const lastBrace = clean.lastIndexOf('}');
-      if (lastBrace !== -1 && lastBrace > firstBrace) {
-        clean = clean.substring(firstBrace, lastBrace + 1);
-      }
-    } else if (firstBracket !== -1) {
-      const lastBracket = clean.lastIndexOf(']');
-      if (lastBracket !== -1 && lastBracket > firstBracket) {
-        clean = clean.substring(firstBracket, lastBracket + 1);
-      }
-    }
-
+  async function cancelTaskFlow() {
     try {
-      const parsed = JSON.parse(clean);
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
-      if (parsed.results && Array.isArray(parsed.results)) {
-        return parsed.results;
-      }
-      if (parsed.videos && Array.isArray(parsed.videos)) {
-        return parsed.videos;
-      }
-      if (parsed.items && Array.isArray(parsed.items)) {
-        return parsed.items;
-      }
-      if (parsed.data && Array.isArray(parsed.data)) {
-        return parsed.data;
-      }
-      // 搜尋物件中任何 Array 屬性
-      for (const key in parsed) {
-        if (Array.isArray(parsed[key])) return parsed[key];
-      }
-      return [];
+      await chrome.runtime.sendMessage({ action: 'CANCEL_ANALYSIS' });
+      showToast('已取消當前任務');
     } catch (err) {
-      console.warn('JSON 解析異常，嘗試正則擷取:', err, clean);
-      const matches = [];
-      const regex = /\{[^{}]*"category"\s*:\s*"([^"]+)"[^{}]*\}/g;
-      let match;
-      while ((match = regex.exec(clean)) !== null) {
-        try {
-          const item = JSON.parse(match[0]);
-          matches.push(item);
-        } catch (_) {}
-      }
-      return matches;
+      console.error('Cancel task failed:', err);
+    }
+  }
+
+  async function clearTaskResultsFlow() {
+    try {
+      await chrome.runtime.sendMessage({ action: 'CLEAR_TASK_RESULTS' });
+      resultsSection.classList.add('hidden');
+      showToast('已清除分類結果');
+    } catch (err) {
+      console.error('Clear results failed:', err);
     }
   }
 
   // ==========================================
   // 結果渲染 (卡片手風琴與摘要)
   // ==========================================
-  function renderResults(videos, categoryList, provider) {
-    categorizedResults = {};
+  function renderResults(categorizedResults, totalVideos, model) {
+    if (!categorizedResults) return;
 
-    // 初始化所有分類陣列
-    categoryList.forEach(cat => {
-      categorizedResults[cat] = [];
-    });
+    const activeCategories = Object.keys(categorizedResults).filter(cat => categorizedResults[cat] && categorizedResults[cat].length > 0);
+    
+    // 計算總影片數
+    let computedTotal = 0;
+    for (const cat in categorizedResults) {
+      computedTotal += (categorizedResults[cat] || []).length;
+    }
 
-    // 將影片分配到各分類
-    videos.forEach(v => {
-      const cat = v.category || '其他';
-      if (!categorizedResults[cat]) {
-        categorizedResults[cat] = [];
-      }
-      categorizedResults[cat].push(v);
-    });
-
-    // 統計數據
-    const activeCategories = Object.keys(categorizedResults).filter(cat => categorizedResults[cat].length > 0);
-    statTotalVideos.textContent = videos.length;
+    statTotalVideos.textContent = totalVideos || computedTotal;
     statCategoryCount.textContent = activeCategories.length;
-    statModelUsed.textContent = getProviderShortName(provider);
+    statModelUsed.textContent = getProviderShortName(model || providerSelect.value);
 
     // 清空並構建卡片 DOM
     categoriesList.innerHTML = '';
 
     // 依影片數量由多到少排序
     const sortedCategories = Object.keys(categorizedResults).sort((a, b) => {
-      // 讓「其他」盡量排在最後
       if (a === '其他') return 1;
       if (b === '其他') return -1;
-      return categorizedResults[b].length - categorizedResults[a].length;
+      return (categorizedResults[b] || []).length - (categorizedResults[a] || []).length;
     });
 
     sortedCategories.forEach((catName, index) => {
-      const catVideos = categorizedResults[catName];
-      if (catVideos.length === 0) return; // 略過沒有影片的分類
+      const catVideos = categorizedResults[catName] || [];
+      if (catVideos.length === 0) return;
 
       const color = BADGE_COLORS[index % BADGE_COLORS.length];
       const card = createCategoryCard(catName, catVideos, color);
@@ -864,23 +569,24 @@ ${JSON.stringify(items, null, 2)}
   // 匯出功能 (Markdown, JSON, CSV)
   // ==========================================
   async function copyAsMarkdown() {
-    if (!scrapedVideos || scrapedVideos.length === 0) {
+    const task = currentCachedTask;
+    if (!task || !task.categorizedResults || Object.keys(task.categorizedResults).length === 0) {
       showToast('⚠️ 目前無分類資料可匯出');
       return;
     }
 
-    const dateStr = new Date().toLocaleString('zh-TW');
+    const dateStr = new Date(task.completedAt || Date.now()).toLocaleString('zh-TW');
     const playlistName = currentPlaylistTitle.textContent;
-    const providerName = getProviderDisplayName(providerSelect.value);
+    const providerName = getProviderDisplayName(providerSelect.value, customModelInput.value.trim());
 
     let md = `# 🎬 YouTube 播放清單分類報表：${playlistName}\n\n`;
-    md += `- **總影片數**：${scrapedVideos.length} 部\n`;
+    md += `- **總影片數**：${task.totalVideos || 0} 部\n`;
     md += `- **分析模型**：${providerName}\n`;
     md += `- **生成時間**：${dateStr}\n\n`;
     md += `---\n\n`;
 
-    for (const [catName, vList] of Object.entries(categorizedResults)) {
-      if (vList.length === 0) continue;
+    for (const [catName, vList] of Object.entries(task.categorizedResults)) {
+      if (!vList || vList.length === 0) continue;
       md += `## 📁 ${catName} (${vList.length} 部)\n\n`;
       vList.forEach((v, idx) => {
         const durText = v.duration && v.duration !== 'N/A' ? ` [${v.duration}]` : '';
@@ -899,7 +605,8 @@ ${JSON.stringify(items, null, 2)}
   }
 
   function exportAsJson() {
-    if (!scrapedVideos || scrapedVideos.length === 0) {
+    const task = currentCachedTask;
+    if (!task || !task.categorizedResults || Object.keys(task.categorizedResults).length === 0) {
       showToast('⚠️ 目前無分類資料可匯出');
       return;
     }
@@ -907,9 +614,9 @@ ${JSON.stringify(items, null, 2)}
     const exportData = {
       playlistTitle: currentPlaylistTitle.textContent,
       exportedAt: new Date().toISOString(),
-      model: providerSelect.value,
-      totalVideos: scrapedVideos.length,
-      categories: categorizedResults
+      model: task.model || providerSelect.value,
+      totalVideos: task.totalVideos || 0,
+      categories: task.categorizedResults
     };
 
     const jsonStr = JSON.stringify(exportData, null, 2);
@@ -918,7 +625,8 @@ ${JSON.stringify(items, null, 2)}
   }
 
   function exportAsCsv() {
-    if (!scrapedVideos || scrapedVideos.length === 0) {
+    const task = currentCachedTask;
+    if (!task || !task.categorizedResults || Object.keys(task.categorizedResults).length === 0) {
       showToast('⚠️ 目前無分類資料可匯出');
       return;
     }
@@ -926,7 +634,8 @@ ${JSON.stringify(items, null, 2)}
     let csvContent = '\uFEFF'; // 加入 BOM 防止 Excel 亂碼
     csvContent += 'VideoId,Title,Channel,Duration,Category,URL\n';
 
-    for (const [catName, vList] of Object.entries(categorizedResults)) {
+    for (const [catName, vList] of Object.entries(task.categorizedResults)) {
+      if (!vList) continue;
       vList.forEach(v => {
         const escapeCsv = (str) => `"${(str || '').replace(/"/g, '""')}"`;
         csvContent += [
@@ -994,7 +703,7 @@ ${JSON.stringify(items, null, 2)}
   }
 
   function getProviderShortName(provider, customModel) {
-    const target = provider === 'custom' ? (customModel || 'Custom') : provider;
+    const target = provider === 'custom' ? (customModel || 'Custom') : (provider || '');
     if (target.toLowerCase().includes('gemini')) return 'Gemini';
     if (target.toLowerCase().includes('gpt') || target.toLowerCase().includes('openai')) return 'OpenAI';
     return target;
