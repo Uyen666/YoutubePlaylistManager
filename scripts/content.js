@@ -466,39 +466,72 @@
         simulateClick(menuBtn);
         await randomDelay(800, 1300);
 
-        // 4. 在彈出選單中尋找並點擊「儲存至播放清單」
+        // 4. 在彈出選單中精準尋找「儲存至播放清單」(嚴格排除「稍後觀看」)
         const saveItem = await waitForElement(() => {
-          const items = document.querySelectorAll('ytd-menu-service-item-renderer, ytd-menu-popup-renderer tp-yt-paper-item, ytd-menu-navigation-item-renderer');
+          const items = document.querySelectorAll('ytd-menu-service-item-renderer, ytd-menu-popup-renderer tp-yt-paper-item, ytd-menu-navigation-item-renderer, tp-yt-paper-listbox ytd-menu-service-item-renderer');
+          
           for (const item of items) {
             const text = (item.textContent || '').trim();
+            
+            // 🚨 嚴格排除「稍後觀看」、「加入待播清單」等非目標選單項目！
+            if (
+              text.includes('稍後觀看') ||
+              text.includes('稍后观看') ||
+              text.includes('Watch later') ||
+              text.includes('Watch Later') ||
+              text.includes('後で見る') ||
+              text.includes('待播清單') ||
+              text.includes('Queue') ||
+              text.includes('queue') ||
+              text.includes('キュー')
+            ) {
+              continue;
+            }
+
+            // 必須吻合「儲存至播放清單」關鍵字
             if (
               text.includes('儲存至播放清單') ||
-              text.includes('儲存') ||
+              text.includes('儲存到播放清單') ||
+              text.includes('儲存至') ||
               text.includes('Save to playlist') ||
-              text.includes('Save') ||
+              text.includes('Save to...') ||
               text.includes('プレイリストに保存') ||
-              text.includes('保存到播放列表')
+              text.includes('保存到播放列表') ||
+              (text.includes('播放清單') && text.includes('儲存')) ||
+              (text.includes('playlist') && text.includes('Save'))
             ) {
               return item;
             }
           }
+
+          // 次要備援：透過圖示判斷 (playlist_add)
+          for (const item of items) {
+            const text = (item.textContent || '').trim();
+            if (text.includes('稍後觀看') || text.includes('Watch later')) continue;
+            const svg = item.querySelector('svg, yt-icon');
+            if (svg && (svg.innerHTML.includes('M22 13h-4v4h-2v-4') || svg.innerHTML.includes('playlist'))) {
+              return item;
+            }
+          }
+
           return null;
-        }, 3000);
+        }, 3500);
 
         if (!saveItem) {
-          console.warn(`[YT-AI-Classifier:DOM-Automation] "Save to playlist" menu option not found.`);
+          console.warn(`[YT-AI-Classifier:DOM-Automation] "Save to playlist" menu option not found (excluded Watch Later).`);
           await closeOpenDialogs();
           failedCount++;
           continue;
         }
 
+        console.log(`[YT-AI-Classifier:DOM-Automation] Clicking "Save to playlist" menu item: "${saveItem.textContent.trim()}"`);
         simulateClick(saveItem);
         await randomDelay(900, 1400);
 
         // 5. 等待「儲存至播放清單」對話框彈出
         const dialog = await waitForElement(() => {
           return document.querySelector('ytd-add-to-playlist-renderer, tp-yt-paper-dialog:not([aria-hidden="true"])');
-        }, 3500);
+        }, 4000);
 
         if (!dialog) {
           console.warn(`[YT-AI-Classifier:DOM-Automation] Playlist dialog did not open.`);
@@ -518,19 +551,27 @@
             await togglePlaylistCheckbox(existingOption, true);
             playlistCreated = true;
           } else {
-            console.log(`[YT-AI-Classifier:DOM-Automation] Creating new playlist "${categoryName}"...`);
+            console.log(`[YT-AI-Classifier:DOM-Automation] Creating new playlist with category name: "${categoryName}"...`);
 
+            // 尋找「建立新的播放清單」按鈕 (支援多種 YouTube 結構)
             const createNewBtn = dialog.querySelector('ytd-add-to-playlist-create-renderer button') ||
+                                 dialog.querySelector('ytd-compact-link-renderer button') ||
+                                 dialog.querySelector('#actions ytd-button-renderer button') ||
                                  dialog.querySelector('button[aria-label*="建立新"]') ||
                                  dialog.querySelector('button[aria-label*="Create new"]') ||
-                                 findButtonByText(dialog, ['建立新的播放清單', '建立新播放清單', 'Create new playlist', '新しいプレイリストを作成', '创建新播放列表']);
+                                 findButtonByText(dialog, ['建立新的播放清單', '建立新播放清單', '新增播放清單', 'Create new playlist', 'New playlist', '新しいプレイリストを作成', '创建新播放列表']);
 
             if (createNewBtn) {
               simulateClick(createNewBtn);
               await randomDelay(800, 1200);
 
-              const nameInput = dialog.querySelector('input#input-1') ||
+              // 填寫清單標題
+              const nameInput = dialog.querySelector('ytd-add-to-playlist-create-renderer input#input-1') ||
                                 dialog.querySelector('tp-yt-paper-input input') ||
+                                dialog.querySelector('input[aria-label*="標題"]') ||
+                                dialog.querySelector('input[aria-label*="Title"]') ||
+                                dialog.querySelector('input[aria-label*="名稱"]') ||
+                                dialog.querySelector('input[aria-label*="Name"]') ||
                                 dialog.querySelector('input[type="text"]') ||
                                 dialog.querySelector('textarea');
 
@@ -541,7 +582,8 @@
                 nameInput.dispatchEvent(new Event('change', { bubbles: true }));
                 await randomDelay(600, 900);
 
-                const privacyDropdown = dialog.querySelector('tp-yt-paper-dropdown-menu, #privacy-picker, ytd-privacy-dropdown-item-renderer');
+                // 設定隱私度 (若可選)
+                const privacyDropdown = dialog.querySelector('tp-yt-paper-dropdown-menu, #privacy-picker, ytd-privacy-dropdown-item-renderer, tp-yt-paper-input-container');
                 if (privacyDropdown && privacy !== 'PUBLIC') {
                   simulateClick(privacyDropdown);
                   await randomDelay(500, 800);
@@ -550,17 +592,21 @@
                   await randomDelay(400, 600);
                 }
 
-                const confirmCreateBtn = dialog.querySelector('tp-yt-paper-button#button') ||
+                // 點擊「建立」確認按鈕
+                const confirmCreateBtn = dialog.querySelector('ytd-add-to-playlist-create-renderer #create-button button') ||
                                          dialog.querySelector('ytd-button-renderer#create-button button') ||
+                                         dialog.querySelector('tp-yt-paper-button#button') ||
                                          findButtonByText(dialog, ['建立', 'Create', '作成', '创建']);
 
                 if (confirmCreateBtn) {
                   simulateClick(confirmCreateBtn);
-                  await randomDelay(1200, 1600);
+                  await randomDelay(1400, 2000);
                   playlistCreated = true;
                   console.log(`[YT-AI-Classifier:DOM-Automation] Playlist "${categoryName}" created successfully!`);
                 }
               }
+            } else {
+              console.warn(`[YT-AI-Classifier:DOM-Automation] "Create new playlist" button not found in dialog.`);
             }
           }
         } else {
