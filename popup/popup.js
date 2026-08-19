@@ -791,10 +791,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /**
  * 注入至 YouTube 頁面原生環境 (MAIN world) 執行的建立播放清單函式
- * 直接透過 YouTube 本地 Innertube Web Client API 建立清單並批次加入影片
+ * 直接透過 YouTube 本地 Innertube Web Client API 建立清單並批次加入影片 (含 SAPISIDHASH 原生認證)
  */
 async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
   try {
+    // 1. 取得 YouTube 頁面配置 (ytcfg)
     let ytcfg = window.ytcfg;
     if (!ytcfg && typeof window.yt !== 'undefined' && window.yt.config_) {
       ytcfg = {
@@ -810,8 +811,33 @@ async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
     const context = ytcfg.get('INNERTUBE_CONTEXT');
     const loggedIn = ytcfg.get('LOGGED_IN');
 
-    if (loggedIn === false) {
-      return { success: false, error: '請先在 YouTube 登入您的 Google 帳號，才能建立播放清單！' };
+    // 2. 計算 Google 原生 SAPISIDHASH 認證金鑰
+    async function computeSAPISIDHash(origin = 'https://www.youtube.com') {
+      function getCookie(name) {
+        const match = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
+        return match ? decodeURIComponent(match[1]) : null;
+      }
+
+      const sapisid = getCookie('SAPISID') ||
+                      getCookie('__Secure-3PAPISID') ||
+                      getCookie('__Secure-1PAPISID') ||
+                      getCookie('APISID');
+
+      if (!sapisid) return null;
+
+      const timestamp = Math.floor(Date.now() / 1000);
+      const data = `${timestamp} ${sapisid} ${origin}`;
+      const msgUint8 = new TextEncoder().encode(data);
+      const hashBuffer = await crypto.subtle.digest('SHA-1', msgUint8);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      return `SAPISIDHASH ${timestamp}_${hashHex}`;
+    }
+
+    const authHeader = await computeSAPISIDHash('https://www.youtube.com');
+
+    if (!authHeader && loggedIn === false) {
+      return { success: false, error: '請先在 YouTube 登入您的 Google 帳號後再建立播放清單！' };
     }
 
     if (!apiKey || !context) {
@@ -820,7 +846,32 @@ async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
 
     const privacyStatus = (privacy === 'PUBLIC') ? 'PUBLIC' : (privacy === 'UNLISTED' ? 'UNLISTED' : 'PRIVATE');
 
-    // 1. 建立播放清單並放入前 50 部影片
+    const clientName = context?.client?.clientName || '1';
+    const clientVersion = context?.client?.clientVersion || '2.20240101.00.00';
+    const authUser = (ytcfg && ytcfg.get('SESSION_INDEX')) || '0';
+    const delegatedSessionId = ytcfg && ytcfg.get('DELEGATED_SESSION_ID');
+    const visitorData = ytcfg && ytcfg.get('VISITOR_DATA');
+
+    // 構建包含完整 SAPISIDHASH 認證的 Headers
+    const reqHeaders = {
+      'Content-Type': 'application/json',
+      'X-Origin': 'https://www.youtube.com',
+      'X-YouTube-Client-Name': String(clientName),
+      'X-YouTube-Client-Version': clientVersion,
+      'X-Goog-AuthUser': String(authUser)
+    };
+
+    if (authHeader) {
+      reqHeaders['Authorization'] = authHeader;
+    }
+    if (delegatedSessionId) {
+      reqHeaders['X-Goog-PageId'] = delegatedSessionId;
+    }
+    if (visitorData) {
+      reqHeaders['X-Goog-Visitor-Id'] = visitorData;
+    }
+
+    // 3. 建立播放清單並放入第一批影片 (最多 50 部)
     const firstBatch = videoIds.slice(0, 50);
     const createPayload = {
       context: context,
@@ -829,18 +880,12 @@ async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
       videoIds: firstBatch
     };
 
-    const clientName = context?.client?.clientName || '1';
-    const clientVersion = context?.client?.clientVersion || '2.20240101.00.00';
+    console.log('[YT-AI-Classifier:NativeEngine] Sending /youtubei/v1/playlist/create with SAPISIDHASH auth...');
 
     const response = await fetch(`/youtubei/v1/playlist/create?key=${apiKey}`, {
       method: 'POST',
       credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-YouTube-Client-Name': String(clientName),
-        'X-YouTube-Client-Version': clientVersion,
-        'X-Origin': 'https://www.youtube.com'
-      },
+      headers: reqHeaders,
       body: JSON.stringify(createPayload)
     });
 
@@ -857,7 +902,7 @@ async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
       return { success: false, error: alertMsg || 'YouTube 未回傳建立之播放清單 ID' };
     }
 
-    // 2. 若影片數量大於 50 部，透過 edit_playlist 批次加入其餘影片
+    // 4. 若影片數量大於 50 部，透過 edit_playlist 批次加入其餘影片
     if (videoIds.length > 50) {
       const remaining = videoIds.slice(50);
       const actions = remaining.map(id => ({
@@ -870,18 +915,13 @@ async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
         await fetch(`/youtubei/v1/browse/edit_playlist?key=${apiKey}`, {
           method: 'POST',
           credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-YouTube-Client-Name': String(clientName),
-            'X-YouTube-Client-Version': clientVersion,
-            'X-Origin': 'https://www.youtube.com'
-          },
+          headers: reqHeaders,
           body: JSON.stringify({
             context: context,
             playlistId: playlistId,
             actions: chunk
           })
-        }).catch(() => {});
+        }).catch((err) => console.warn('[YT-AI-Classifier:NativeEngine] Edit playlist chunk error:', err));
       }
     }
 
