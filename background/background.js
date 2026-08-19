@@ -418,6 +418,28 @@ function findBestMatchingCategory(rawCat, categories) {
 }
 
 /**
+ * 具備 15 秒超時自動中斷機制的 fetch 封裝 (避免 API 伺服器掛起無回應)
+ */
+async function fetchWithTimeout(url, options, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    return response;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`API 伺服器連線超時 (${timeoutMs / 1000} 秒未回應)`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * 呼叫 Google Gemini API (支援 Structured Output JSON Schema)
  */
 async function callGeminiAPI(items, categories, model, apiKey) {
@@ -472,11 +494,11 @@ ${JSON.stringify(items, null, 2)}
     }
   };
 
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(requestBody)
-  });
+  }, 15000);
 
   if (!response.ok) {
     const errorJson = await response.json().catch(() => ({}));
@@ -518,14 +540,14 @@ async function callOpenAIAPI(items, categories, model, apiKey) {
     temperature: 0.1
   };
 
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
     body: JSON.stringify(requestBody)
-  });
+  }, 15000);
 
   if (!response.ok) {
     const errorJson = await response.json().catch(() => ({}));

@@ -188,8 +188,15 @@
     const scrollContainer = playlistPanel || null;
 
     console.log('[YT-AI-Classifier] Starting auto-scroll scraping. Target:', targetMax);
+    const scrapeStartTime = Date.now();
+    const maxScrapeDurationMs = 15000; // 最多滾動 15 秒，避免背景分頁無限期卡住
 
     while (videoMap.size < targetMax && noChangeCount < maxNoChangeTries) {
+      if (Date.now() - scrapeStartTime > maxScrapeDurationMs) {
+        console.warn('[YT-AI-Classifier] Scraping reached max duration (15s). Proceeding with collected videos.');
+        break;
+      }
+
       // 執行滾動
       if (scrollContainer) {
         scrollContainer.scrollTop += 1200;
