@@ -108,6 +108,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const targetText = target === Infinity ? '全部' : target;
     
     chrome.storage.local.get(['currentTask'], (res) => {
+      // 若任務已結束或已完成，不再處理過期之進度訊息
+      if (!isTaskRunning || res.currentTask?.status === 'completed') return;
+
       const isQuick = res.currentTask?.model === '純擷取 (0 Token)';
       const maxPercent = isQuick ? 90 : 40;
       const stepLabel = isQuick ? '正在背景滾動網頁擷取影片...' : '步驟 1/2: 正在滾動網頁擷取影片...';
@@ -123,12 +126,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 /**
- * 輔助更新 chrome.storage.local 中的 currentTask 狀態
+ * 輔助更新 chrome.storage.local 中的 currentTask 狀態 (含狀態鎖定保護)
  */
 async function updateTaskState(partialState) {
   return new Promise((resolve) => {
     chrome.storage.local.get(['currentTask'], (result) => {
       const currentTask = result.currentTask || {};
+
+      // 嚴格狀態保護：若任務已完成/結束，禁止被任何延遲的進度訊息竄改回 scraping 或 classifying
+      if (partialState.status === 'scraping' || partialState.status === 'classifying') {
+        if (!isTaskRunning || currentTask.status === 'completed') {
+          console.warn('[YT-AI-Classifier:Background] Blocked late progress update from overriding completed task state.');
+          resolve(currentTask);
+          return;
+        }
+      }
+
       const updated = {
         ...currentTask,
         ...partialState,
