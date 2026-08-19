@@ -13,6 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // 設定欄位
   const providerSelect = document.getElementById('providerSelect');
+  const customModelGroup = document.getElementById('customModelGroup');
+  const customModelInput = document.getElementById('customModelInput');
   const apiKeyInput = document.getElementById('apiKeyInput');
   const toggleKeyVisibilityBtn = document.getElementById('toggleKeyVisibilityBtn');
   const eyeIcon = document.getElementById('eyeIcon');
@@ -100,8 +102,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    // 模型供應商切換時更新說明連結
+    // 模型供應商切換時更新說明連結與自訂輸入框
     providerSelect.addEventListener('change', () => {
+      toggleCustomModelField(providerSelect.value);
       updateApiKeyHelpLink(providerSelect.value);
     });
 
@@ -155,13 +158,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   async function loadSettings() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(['provider', 'apiKey', 'categories', 'maxItems'], (result) => {
-        if (result.provider) providerSelect.value = result.provider;
+      chrome.storage.local.get(['provider', 'customModel', 'apiKey', 'categories', 'maxItems'], (result) => {
+        let provider = result.provider || 'gemini-3.6-flash';
+        // 若儲存為已下架的 gemini-2.0-flash，自動升級為 gemini-3.6-flash
+        if (provider === 'gemini-2.0-flash') {
+          provider = 'gemini-3.6-flash';
+          chrome.storage.local.set({ provider: 'gemini-3.6-flash' });
+        }
+
+        providerSelect.value = provider;
+        if (result.customModel) customModelInput.value = result.customModel;
         if (result.apiKey) apiKeyInput.value = result.apiKey;
         categoriesInput.value = result.categories || DEFAULT_CATEGORIES;
         if (result.maxItems) maxItemsSelect.value = result.maxItems;
 
-        updateApiKeyHelpLink(providerSelect.value);
+        toggleCustomModelField(provider);
+        updateApiKeyHelpLink(provider);
 
         // 若無 API Key，自動展開設定面板引導使用者
         if (!result.apiKey) {
@@ -174,8 +186,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function toggleCustomModelField(provider) {
+    if (provider === 'custom') {
+      customModelGroup.classList.remove('hidden');
+    } else {
+      customModelGroup.classList.add('hidden');
+    }
+  }
+
   function updateApiKeyHelpLink(provider) {
-    if (provider.startsWith('gemini')) {
+    const isGemini = provider.startsWith('gemini') || (provider === 'custom' && customModelInput.value.toLowerCase().includes('gemini'));
+    if (isGemini) {
       apiKeyHelpLink.href = 'https://aistudio.google.com/app/apikey';
       apiKeyHelpLink.textContent = '取得免費 Gemini Key ↗';
     } else {
@@ -187,6 +208,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function saveSettings() {
     const settings = {
       provider: providerSelect.value,
+      customModel: customModelInput.value.trim(),
       apiKey: apiKeyInput.value.trim(),
       categories: categoriesInput.value.trim() || DEFAULT_CATEGORIES,
       maxItems: maxItemsSelect.value
@@ -330,16 +352,19 @@ document.addEventListener('DOMContentLoaded', () => {
       // ----------------------------------------------------
       // 階段 2: 批次呼叫 LLM 智慧分類
       // ----------------------------------------------------
-      const provider = providerSelect.value;
+      const selectedProvider = providerSelect.value;
+      const customModelVal = customModelInput.value.trim();
+      const effectiveModel = selectedProvider === 'custom' ? (customModelVal || 'gemini-3.6-flash') : selectedProvider;
+
       const categorizedVideos = await classifyVideosWithLLM(
         scrapedVideos,
         categoryList,
-        provider,
+        effectiveModel,
         apiKey,
         (batchIndex, totalBatches, percent) => {
           updateProgress(
             `步驟 2/2: AI 分類中 (批次 ${batchIndex}/${totalBatches})...`,
-            `正在使用 ${getProviderDisplayName(provider)} 分析影片內容...`,
+            `正在使用 ${getProviderDisplayName(selectedProvider, customModelVal)} 分析影片內容...`,
             40 + Math.round(percent * 0.55)
           );
         }
@@ -351,7 +376,7 @@ document.addEventListener('DOMContentLoaded', () => {
       updateProgress('完成！', '整理分類報表中...', 100);
       setTimeout(() => {
         progressSection.classList.add('hidden');
-        renderResults(categorizedVideos, categoryList, provider);
+        renderResults(categorizedVideos, categoryList, selectedProvider);
         resultsSection.classList.remove('hidden');
         showToast('🎉 播放清單分類完成！');
       }, 500);
@@ -378,7 +403,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   // LLM 分類引擎 (支援批次、指數退避與多層次容錯解析)
   // ==========================================
-  async function classifyVideosWithLLM(videos, categories, provider, apiKey, onBatchProgress) {
+  async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchProgress) {
     const BATCH_SIZE = 25; // 每批 25 部影片
     const totalBatches = Math.ceil(videos.length / BATCH_SIZE);
     const results = [];
@@ -401,7 +426,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const classifiedBatch = await classifySingleBatchWithRetry(
         simplifiedList,
         categories,
-        provider,
+        model,
         apiKey
       );
 
@@ -470,7 +495,7 @@ document.addEventListener('DOMContentLoaded', () => {
   /**
    * 具備指數退避重試的單一批次分類函式
    */
-  async function classifySingleBatchWithRetry(items, categories, provider, apiKey, maxRetries = 3) {
+  async function classifySingleBatchWithRetry(items, categories, model, apiKey, maxRetries = 3) {
     let lastError = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -481,10 +506,11 @@ document.addEventListener('DOMContentLoaded', () => {
           await new Promise(r => setTimeout(r, delayMs));
         }
 
-        if (provider.startsWith('gemini')) {
-          return await callGeminiAPI(items, categories, provider, apiKey);
+        const isGemini = model.toLowerCase().includes('gemini');
+        if (isGemini) {
+          return await callGeminiAPI(items, categories, model, apiKey);
         } else {
-          return await callOpenAIAPI(items, categories, provider, apiKey);
+          return await callOpenAIAPI(items, categories, model, apiKey);
         }
       } catch (err) {
         lastError = err;
@@ -952,19 +978,25 @@ ${JSON.stringify(items, null, 2)}
       .replace(/'/g, '&#039;');
   }
 
-  function getProviderDisplayName(provider) {
+  function getProviderDisplayName(provider, customModel) {
+    if (provider === 'custom') {
+      return `自訂模型 (${customModel || '未填寫'})`;
+    }
     switch (provider) {
-      case 'gemini-2.0-flash': return 'Google Gemini 2.0 Flash';
+      case 'gemini-3.6-flash': return 'Google Gemini 3.6 Flash';
+      case 'gemini-2.5-flash': return 'Google Gemini 2.5 Flash';
       case 'gemini-1.5-flash': return 'Google Gemini 1.5 Flash';
+      case 'gemini-1.5-pro': return 'Google Gemini 1.5 Pro';
       case 'gpt-4o-mini': return 'OpenAI GPT-4o mini';
       case 'gpt-4o': return 'OpenAI GPT-4o';
       default: return provider;
     }
   }
 
-  function getProviderShortName(provider) {
-    if (provider.startsWith('gemini')) return 'Gemini';
-    if (provider.startsWith('gpt')) return 'OpenAI';
-    return provider;
+  function getProviderShortName(provider, customModel) {
+    const target = provider === 'custom' ? (customModel || 'Custom') : provider;
+    if (target.toLowerCase().includes('gemini')) return 'Gemini';
+    if (target.toLowerCase().includes('gpt') || target.toLowerCase().includes('openai')) return 'OpenAI';
+    return target;
   }
 });

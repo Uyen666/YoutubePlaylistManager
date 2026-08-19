@@ -5,7 +5,7 @@
 [![OpenAI](https://img.shields.io/badge/AI-OpenAI%20GPT--4o-green.svg)](https://openai.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-專為 YouTube 播放清單設計的 Chrome 擴充功能（Manifest V3）。能自動在播放清單頁面中向下滾動並擷取完整影片（標題、頻道、時長、連結），透過 **Google Gemini 2.0 Flash** 或 **OpenAI GPT-4o mini** 依自訂標籤進行智慧歸類，並在 Popup 介面中輸出視覺化分類報告，支援一鍵複製 Markdown 與匯出 JSON / CSV。
+專為 YouTube 播放清單設計的 Chrome 擴充功能（Manifest V3）。能自動在播放清單頁面中向下滾動並擷取完整影片（標題、頻道、時長、連結），透過 **Google Gemini 3.6 Flash**、**Gemini 2.5 Flash** 或 **OpenAI GPT-4o mini**（亦支援自訂任意模型 ID）依自訂標籤進行智慧歸類，並在 Popup 介面中輸出視覺化分類報告，支援一鍵複製 Markdown 與匯出 JSON / CSV。
 
 GitHub 儲存庫：[https://github.com/Uyen666/YoutubePlaylistManager](https://github.com/Uyen666/YoutubePlaylistManager)
 
@@ -19,10 +19,10 @@ GitHub 儲存庫：[https://github.com/Uyen666/YoutubePlaylistManager](https://g
    - 自動過濾已刪除或私人影片，並支援自訂擷取數量上限（50、100、200 或無上限）。
 
 2. **🧠 LLM 批次分類引擎 (`popup.js`)**：
-   - **雙引擎支援**：支援 **Google Gemini** (Gemini 2.0 Flash / 1.5 Flash) 與 **OpenAI** (GPT-4o mini / GPT-4o)。
+   - **多模型與自訂支援**：預載 **Google Gemini** (Gemini 3.6 Flash / 2.5 Flash / 1.5 Flash / 1.5 Pro)、**OpenAI** (GPT-4o mini / GPT-4o) 以及「自訂模型 ID」，永遠不用擔心模型過期。
    - **批次處理 (Batching)**：自動將大量影片以 25 部為單位分批請求，避免 Payload 超標或逾時。
    - **指數退避重試 (Exponential Backoff)**：若遇 API Rate Limit (HTTP 429) 或網路異常，自動進行指數延遲重試。
-   - **嚴格結構化輸出**：要求純 JSON 回傳，並具備 Markdown 代碼塊自動過濾與 Fallback 機制。
+   - **嚴格結構化輸出**：支援 Gemini Native Schema Enum 與 OpenAI JSON Object，具備多層次映射與模糊比對容錯機制。
 
 3. **🎨 現代化深色 UI (`popup.html` & `popup.css`)**：
    - 即時分頁狀態偵測（非 YouTube 清單時友善提示並禁用按鈕）。
@@ -96,7 +96,7 @@ YoutubePlaylistManager/
    - 點擊工具列上的擴充功能圖示。
 3. **完成初次設定**：
    - 點擊右上角「⚙️」開啟偏好設定。
-   - 選擇模型（預設 `Gemini 2.0 Flash`）。
+   - 選擇模型（預設推薦 `Gemini 3.6 Flash`，亦可切換為其他模型或自訂 ID）。
    - 貼上您的 API Key。
    - 依需求自訂分類標籤（例：`程式開發, 投資理財, 流行音樂, 遊戲動漫, 生活雜談, 其他`）或點擊快速預設按鈕。
    - 點擊「💾 儲存設定」。

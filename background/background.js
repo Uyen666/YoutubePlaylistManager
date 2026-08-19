@@ -10,8 +10,8 @@ chrome.runtime.onInstalled.addListener((details) => {
   chrome.storage.local.get(['provider', 'categories', 'maxItems'], (result) => {
     const defaultSettings = {};
 
-    if (!result.provider) {
-      defaultSettings.provider = 'gemini-2.0-flash';
+    if (!result.provider || result.provider === 'gemini-2.0-flash') {
+      defaultSettings.provider = 'gemini-3.6-flash';
     }
 
     if (!result.categories) {

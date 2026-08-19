@@ -50,14 +50,25 @@
         <label for="providerSelect">AI 模型供應商：</label>
         <select id="providerSelect" class="form-control">
           <optgroup label="Google Gemini (推薦)">
-            <option value="gemini-2.0-flash">Gemini 2.0 Flash (高速極致推薦)</option>
-            <option value="gemini-1.5-flash">Gemini 1.5 Flash (穩定高性價)</option>
+            <option value="gemini-3.6-flash" selected>Gemini 3.6 Flash (最新極速推薦)</option>
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+            <option value="gemini-1.5-flash">Gemini 1.5 Flash (經典穩定)</option>
+            <option value="gemini-1.5-pro">Gemini 1.5 Pro (深度分析)</option>
           </optgroup>
           <optgroup label="OpenAI">
             <option value="gpt-4o-mini">GPT-4o mini (快速輕量)</option>
             <option value="gpt-4o">GPT-4o (旗艦精準)</option>
           </optgroup>
+          <optgroup label="自訂模型">
+            <option value="custom">自訂模型 ID (手動填寫)...</option>
+          </optgroup>
         </select>
+      </div>
+
+      <!-- 自訂模型輸入框 -->
+      <div id="customModelGroup" class="form-group hidden">
+        <label for="customModelInput">自訂模型 ID：</label>
+        <input type="text" id="customModelInput" class="form-control" placeholder="例：gemini-3.6-flash 或 gpt-4o">
       </div>
 
       <!-- API Key 輸入 -->
