@@ -300,16 +300,16 @@ if (chrome.notifications && chrome.notifications.onClicked) {
 // LLM 分類引擎 (支援批次、指數退避與多層次容錯解析)
 // ==========================================
 async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchProgress) {
-  const BATCH_SIZE = 50; // 每批 50 部影片 (大幅減少請求次數，徹底避免觸發 Google 每分鐘 20 次限制)
+  const BATCH_SIZE = 75; // 每批 75 部影片 (561 部影片只需 8 次請求，徹底壓在 Google 20 次限制之內)
   const totalBatches = Math.ceil(videos.length / BATCH_SIZE);
   const results = [];
 
   for (let i = 0; i < totalBatches; i++) {
     if (currentCancelToken) throw new Error('任務已被使用者取消');
 
-    // 批次間隔 1.5 秒保護
+    // 批次間隔 2 秒保護，平滑分散請求
     if (i > 0) {
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 2000));
     }
 
     const batchStart = i * BATCH_SIZE;
@@ -329,7 +329,9 @@ async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchP
       simplifiedList,
       categories,
       model,
-      apiKey
+      apiKey,
+      i + 1,
+      totalBatches
     );
 
     const classifiedMapById = new Map();
@@ -390,9 +392,9 @@ async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchP
 }
 
 /**
- * 具備智慧解析與指數退避重試的單一批次分類函式
+ * 具備智慧即時倒數與自適應重試的單一批次分類函式
  */
-async function classifySingleBatchWithRetry(items, categories, model, apiKey, maxRetries = 5) {
+async function classifySingleBatchWithRetry(items, categories, model, apiKey, batchIndex = 1, totalBatches = 1, maxRetries = 8) {
   let lastError = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -400,24 +402,38 @@ async function classifySingleBatchWithRetry(items, categories, model, apiKey, ma
 
     try {
       if (attempt > 0) {
-        let waitMs = Math.pow(2, attempt) * 2000;
+        let waitSeconds = Math.min(60, Math.pow(2, attempt) * 3);
 
-        // 智慧解析 Google 回傳的精準重試秒數 (例: "Please retry in 13.33s")
+        // 智慧解析 Google 回傳的精準冷卻秒數 (例: "Please retry in 58.40s")
         if (lastError && lastError.message) {
           const retryMatch = lastError.message.match(/Please retry in ([\d\.]+)s/i) ||
                              lastError.message.match(/retry after ([\d\.]+)s/i);
           if (retryMatch && retryMatch[1]) {
-            const parsedSeconds = parseFloat(retryMatch[1]);
-            if (!isNaN(parsedSeconds)) {
-              waitMs = Math.ceil(parsedSeconds * 1000) + 1500; // 加上 1.5 秒緩衝
+            const parsed = parseFloat(retryMatch[1]);
+            if (!isNaN(parsed) && parsed > 0) {
+              waitSeconds = Math.ceil(parsed) + 2; // 多加 2 秒確保配額窗口完全恢復
             }
           } else if (lastError.message.includes('429') || lastError.message.includes('quota') || lastError.message.includes('RESOURCE_EXHAUSTED')) {
-            waitMs = Math.max(waitMs, 10000); // 至少等待 10 秒
+            waitSeconds = Math.max(waitSeconds, 20);
           }
         }
 
-        console.warn(`[YT-AI-Classifier:Background] Cooling down for ${(waitMs / 1000).toFixed(1)}s (Attempt ${attempt}/${maxRetries}) due to Google rate limit...`);
-        await new Promise(r => setTimeout(r, waitMs));
+        console.warn(`[YT-AI-Classifier:Background] Google API Rate Limit hit. Cooling down for ${waitSeconds}s (Batch ${batchIndex}/${totalBatches}, Attempt ${attempt}/${maxRetries})...`);
+
+        // 秒級動態倒數通知 (讓使用者在 Popup 介面上清楚看到剩餘秒數，絕不卡死)
+        for (let sec = waitSeconds; sec > 0; sec--) {
+          if (currentCancelToken) throw new Error('任務已被使用者取消');
+          await updateTaskState({
+            statusTitle: `⏳ API 頻率重設中 (批次 ${batchIndex}/${totalBatches})`,
+            statusDetail: `達到 Google 呼叫頻率上限，系統自動倒數等待：剩餘 ${sec} 秒後繼續分類...`
+          });
+          await new Promise(r => setTimeout(r, 1000));
+        }
+
+        await updateTaskState({
+          statusTitle: `步驟 2/2: AI 分類中 (批次 ${batchIndex}/${totalBatches})...`,
+          statusDetail: `冷卻完成，正在重新發送批次請求...`
+        });
       }
 
       const isGemini = model.toLowerCase().includes('gemini');
