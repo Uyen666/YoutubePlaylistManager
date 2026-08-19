@@ -304,6 +304,11 @@ async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchP
   for (let i = 0; i < totalBatches; i++) {
     if (currentCancelToken) throw new Error('任務已被使用者取消');
 
+    // 批次間隔 1.2 秒保護，避免瞬間觸發 Google 每分鐘 15 次請求 (15 RPM) 的短時間頻率限制
+    if (i > 0) {
+      await new Promise(r => setTimeout(r, 1200));
+    }
+
     const batchStart = i * BATCH_SIZE;
     const batchVideos = videos.slice(batchStart, batchStart + BATCH_SIZE);
 
@@ -382,9 +387,9 @@ async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchP
 }
 
 /**
- * 具備指數退避重試的單一批次分類函式
+ * 具備指數退避重試的單一批次分類函式 (支援 429 頻率限制自動等待冷卻)
  */
-async function classifySingleBatchWithRetry(items, categories, model, apiKey, maxRetries = 3) {
+async function classifySingleBatchWithRetry(items, categories, model, apiKey, maxRetries = 4) {
   let lastError = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -392,7 +397,10 @@ async function classifySingleBatchWithRetry(items, categories, model, apiKey, ma
 
     try {
       if (attempt > 0) {
-        const delayMs = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+        // 如果是 429 速率限制，延長等待時間 5s, 10s, 20s
+        const isRateLimit = lastError && (lastError.message.includes('429') || lastError.message.includes('quota') || lastError.message.includes('RESOURCE_EXHAUSTED'));
+        const baseDelay = isRateLimit ? 5000 : 1000;
+        const delayMs = Math.pow(2, attempt) * baseDelay + Math.random() * 1000;
         console.warn(`[YT-AI-Classifier:Background] Retrying API request (Attempt ${attempt}/${maxRetries}) after ${Math.round(delayMs)}ms...`);
         await new Promise(r => setTimeout(r, delayMs));
       }
@@ -406,8 +414,8 @@ async function classifySingleBatchWithRetry(items, categories, model, apiKey, ma
     } catch (err) {
       lastError = err;
       console.warn(`[YT-AI-Classifier:Background] API Attempt ${attempt + 1} failed:`, err.message);
-      // 如果是 API Key 錯誤 (401, 403)，不要重試，直接拋出
-      if (err.message.includes('API_KEY_INVALID') || err.message.includes('401') || err.message.includes('403') || err.message.includes('quota') || err.message.includes('no longer available')) {
+      // 只有在 API Key 真正無效或模型不存在時才直接拋出；429 Rate Limit 會自動進行指數退避等待重試！
+      if (err.message.includes('API_KEY_INVALID') || err.message.includes('401') || err.message.includes('403') || err.message.includes('no longer available')) {
         throw err;
       }
     }
