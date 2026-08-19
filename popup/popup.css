@@ -374,6 +374,36 @@ body {
   overflow: hidden;
 }
 
+
+.info-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.platform-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: all 0.2s ease;
+}
+
+.platform-badge.platform-youtube {
+  background: rgba(255, 0, 51, 0.15);
+  color: #ff334b;
+  border: 1px solid rgba(255, 0, 51, 0.3);
+}
+
+.platform-badge.platform-bilibili {
+  background: rgba(0, 174, 236, 0.15);
+  color: #00aeec;
+  border: 1px solid rgba(0, 174, 236, 0.3);
+}
+
 .info-label {
   font-size: 10px;
   text-transform: uppercase;

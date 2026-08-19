@@ -28,6 +28,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 主要操作與資訊
   const currentPlaylistTitle = document.getElementById('currentPlaylistTitle');
+  const platformBadge = document.getElementById('platformBadge');
+  let currentDetectedPlatform = 'youtube';
   const startAnalyzeBtn = document.getElementById('startAnalyzeBtn');
   const quickExtractBtn = document.getElementById('quickExtractBtn');
   const importFileBtn = document.getElementById('importFileBtn');
@@ -269,17 +271,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const url = tab.url;
       const isYtUrl = url.includes('youtube.com/playlist') || (url.includes('youtube.com/watch') && url.includes('list='));
+      const isBiliUrl = (url.includes('space.bilibili.com') && url.includes('/favlist')) ||
+                        url.includes('bilibili.com/medialist/play/') ||
+                        url.includes('bilibili.com/list/ml');
 
-      if (!isYtUrl) {
+      if (!isYtUrl && !isBiliUrl) {
         setNotPlaylistState();
         return;
       }
+
+      const fallbackPlatform = isBiliUrl ? 'bilibili' : 'youtube';
 
       // 嘗試向 content script 發送 PING 請求
       try {
         const response = await chrome.tabs.sendMessage(tab.id, { action: 'CHECK_PAGE' });
         if (response && response.isPlaylist) {
-          setPlaylistReadyState(tab.title || 'YouTube 播放清單');
+          const platform = response.platform || fallbackPlatform;
+          setPlaylistReadyState(response.title || tab.title || (platform === 'bilibili' ? 'Bilibili 收藏夾' : 'YouTube 播放清單'), platform);
         } else {
           setNotPlaylistState();
         }
@@ -292,7 +300,8 @@ document.addEventListener('DOMContentLoaded', () => {
           });
           const retryResponse = await chrome.tabs.sendMessage(tab.id, { action: 'CHECK_PAGE' });
           if (retryResponse && retryResponse.isPlaylist) {
-            setPlaylistReadyState(tab.title || 'YouTube 播放清單');
+            const platform = retryResponse.platform || fallbackPlatform;
+            setPlaylistReadyState(retryResponse.title || tab.title || (platform === 'bilibili' ? 'Bilibili 收藏夾' : 'YouTube 播放清單'), platform);
           } else {
             setNotPlaylistState();
           }
@@ -307,29 +316,45 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function setPlaylistReadyState(title) {
+  function setPlaylistReadyState(title, platform = 'youtube') {
     isTargetPlaylist = true;
+    currentDetectedPlatform = platform;
     pageAlert.classList.add('hidden');
     // 如果目前沒有正在進行的任務，啟用開始分析按鈕
     if (!currentCachedTask || (currentCachedTask.status !== 'scraping' && currentCachedTask.status !== 'classifying')) {
       startAnalyzeBtn.disabled = false;
     }
-    currentPlaylistTitle.textContent = cleanTitle(title);
+    if (platformBadge) {
+      platformBadge.classList.remove('hidden', 'platform-youtube', 'platform-bilibili');
+      platformBadge.classList.add(`platform-${platform}`);
+      platformBadge.textContent = platform === 'bilibili' ? 'Bilibili' : 'YouTube';
+    }
+    currentPlaylistTitle.textContent = cleanTitle(title, platform);
     currentPlaylistTitle.title = title;
   }
 
   function setNotPlaylistState(customMsg) {
     isTargetPlaylist = false;
+    currentDetectedPlatform = 'unknown';
     pageAlert.classList.remove('hidden');
+    if (platformBadge) {
+      platformBadge.classList.add('hidden');
+    }
     // 若沒有背景任務進行中，停用按鈕
     if (!currentCachedTask || (currentCachedTask.status !== 'scraping' && currentCachedTask.status !== 'classifying')) {
       startAnalyzeBtn.disabled = true;
     }
-    currentPlaylistTitle.textContent = customMsg || '未偵測到 YouTube 播放清單';
+    currentPlaylistTitle.textContent = customMsg || '未偵測到 YouTube 清單或 B 站收藏夾';
   }
 
-  function cleanTitle(title) {
-    return title.replace(/ - YouTube$/, '').trim();
+  function cleanTitle(title, platform = 'youtube') {
+    if (!title) return platform === 'bilibili' ? 'Bilibili 收藏夾' : 'YouTube 播放清單';
+    return title
+      .replace(/ - YouTube$/i, '')
+      .replace(/_哔哩哔哩_bilibili$/i, '')
+      .replace(/的个人空间-哔哩哔哩.*$/i, '')
+      .replace(/- 哔哩哔哩.*$/i, '')
+      .trim();
   }
 
   // ==========================================
@@ -455,6 +480,7 @@ document.addEventListener('DOMContentLoaded', () => {
         tabId: currentTab.id,
         playlistUrl: currentTab.url,
         playlistTitle: currentPlaylistTitle.textContent,
+        platform: currentDetectedPlatform,
         maxItems,
         categories: categoryList,
         provider: selectedProvider,
@@ -481,7 +507,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==========================================
   async function startQuickExtractFlow() {
     if (!currentTab || !isTargetPlaylist) {
-      showToast('⚠️ 請先開啟 YouTube 播放清單網頁');
+      showToast('⚠️ 請先開啟 YouTube 播放清單或 Bilibili 收藏夾網頁');
       return;
     }
 

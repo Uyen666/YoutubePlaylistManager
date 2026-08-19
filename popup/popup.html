@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YouTube 播放清單 AI 分類器</title>
+  <title>YouTube & Bilibili AI 分類器</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -18,7 +18,7 @@
           </svg>
         </div>
         <div class="brand-info">
-          <h1>YouTube 清單分類器</h1>
+          <h1>YT & B站 清單分類器</h1>
           <span class="version-tag">AI Powered</span>
         </div>
       </div>
@@ -30,12 +30,14 @@
       </button>
     </header>
 
-    <!-- 非播放清單提示橫幅 -->
+    <!-- 非目標清單提示橫幅 -->
     <div id="pageAlert" class="alert-banner hidden">
       <div class="alert-icon">⚠️</div>
       <div class="alert-content">
-        <p class="alert-title">非 YouTube 播放清單頁面</p>
-        <p class="alert-desc">請前往 YouTube 播放清單網頁（網址包含 <code>/playlist?list=...</code> 或正在播放的清單）後再使用本功能。</p>
+        <p class="alert-title">非受支援的清單/收藏夾頁面</p>
+        <p class="alert-desc">請前往 YouTube 播放清單（<code>/playlist?list=...</code>）或 Bilibili 空間收藏夾（<code>space.bilibili.com/.../favlist</code>）後再使用本功能。</p>
+      </div>
+    </div>��放清單網頁（網址包含 <code>/playlist?list=...</code> 或正在播放的清單）後再使用本功能。</p>
       </div>
     </div>
 
@@ -134,7 +136,10 @@
       <div id="playlistInfoCard" class="info-card">
         <div class="info-icon">📋</div>
         <div class="info-meta">
-          <div class="info-label">目標播放清單</div>
+          <div class="info-label-row">
+            <span class="info-label">目標清單 / 收藏夾</span>
+            <span id="platformBadge" class="platform-badge hidden">YouTube</span>
+          </div>
           <div id="currentPlaylistTitle" class="info-title">偵測中...</div>
         </div>
       </div>

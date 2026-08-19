@@ -1,11 +1,12 @@
-# 🎬 YouTube 播放清單 AI 分類器 (YouTube Playlist Manager)
+# 🎬 YouTube & Bilibili 播放清單 / 收藏夾 AI 分類器
 
 [![Manifest V3](https://img.shields.io/badge/Chrome%20Extension-Manifest%20V3-blue.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
+[![Platforms](https://img.shields.io/badge/Platform-YouTube%20%7C%20Bilibili-critical.svg)](#)
 [![Google Gemini](https://img.shields.io/badge/AI-Google%20Gemini-orange.svg)](https://ai.google.dev/)
 [![OpenAI](https://img.shields.io/badge/AI-OpenAI%20GPT--4o-green.svg)](https://openai.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-專為 YouTube 播放清單設計的 Chrome 擴充功能（Manifest V3）。能自動在播放清單頁面中向下滾動並擷取完整影片（標題、頻道、時長、連結），透過 **Google Gemini 3.6 Flash**、**Gemini 2.5 Flash** 或 **OpenAI GPT-4o mini**（亦支援自訂任意模型 ID）依自訂標籤進行智慧歸類，並在 Popup 介面中輸出視覺化分類報告，支援一鍵複製 Markdown 與匯出 JSON / CSV。
+專為 **YouTube 播放清單** 與 **Bilibili（B站）收藏夾** 設計的雙平台智慧管理 Chrome 擴充功能（Manifest V3）。支援自動向下滾動與跨頁翻頁擷取完整影片清單（標題、UP主/頻道、時長、連結、BV號/影片ID），透過 **Google Gemini 3.6 Flash** 或 **OpenAI GPT-4o mini** 依自訂標籤進行智慧語意歸類，輸出視覺化分類報告，並支援一鍵複製 Markdown 與匯出 JSON / CSV。
 
 GitHub 儲存庫：[https://github.com/Uyen666/YoutubePlaylistManager](https://github.com/Uyen666/YoutubePlaylistManager)
 
@@ -13,66 +14,40 @@ GitHub 儲存庫：[https://github.com/Uyen666/YoutubePlaylistManager](https://g
 
 ## ✨ 核心特色
 
-1. **🚀 智慧動態爬蟲 (`content.js`)**：
-   - 支援 YouTube 播放清單頁面 (`/playlist?list=...`) 與影片播放頁中的清單面板 (`/watch?...&list=...`)。
-   - 平滑自動向下滾動（Auto-scroll），動態載入並擷取影片 `videoId`、`title`、`channelTitle`、`duration` 等資訊。
-   - 自動過濾已刪除或私人影片，並支援自訂擷取數量上限（50、100、200 或無上限）。
+1. **🌐 雙平台適配器架構 (Adapter Pattern)**：
+   - **YouTube 支援**：播放清單頁面 (`/playlist?list=...`) 與影片播放頁右側面板 (`/watch?...&list=...`)，支援 500+ ~ 2000+ 部大清單動態滾動載入。
+   - **Bilibili 支援**：個人空間收藏夾 (`space.bilibili.com/.../favlist`) 與媒體播放列表 (`bilibili.com/medialist/play/...`)，自動解析 BV 號、標題、UP 主與時長。
+   - **B 站防風控機制**：自動翻頁間加入 800ms~1500ms 隨機擬人化延遲，安全穩定杜絕頻率限制。
 
-2. **🧠 LLM 批次分類引擎 (`popup.js`)**：
-   - **多模型與自訂支援**：預載 **Google Gemini** (Gemini 3.6 Flash / 2.5 Flash / 1.5 Flash / 1.5 Pro)、**OpenAI** (GPT-4o mini / GPT-4o) 以及「自訂模型 ID」，永遠不用擔心模型過期。
-   - **批次處理 (Batching)**：自動將大量影片以 25 部為單位分批請求，避免 Payload 超標或逾時。
-   - **指數退避重試 (Exponential Backoff)**：若遇 API Rate Limit (HTTP 429) 或網路異常，自動進行指數延遲重試。
-   - **嚴格結構化輸出**：支援 Gemini Native Schema Enum 與 OpenAI JSON Object，具備多層次映射與模糊比對容錯機制。
+2. **🧠 LLM 批次分類引擎 (支援 75 部大批次與冷卻倒數)**：
+   - **多模型與自訂支援**：預載 **Google Gemini** (Gemini 3.6 Flash / 1.5 Flash / 1.5 Pro)、**OpenAI** (GPT-4o mini / GPT-4o) 以及「自訂模型 ID」。
+   - **75 部大容量批次**：大幅縮減 API 請求次數（561 部影片僅需 7~8 次請求），徹底壓在免費頻率上限之內。
+   - **即時秒級冷卻倒數**：若觸發 Google 每日/每分鐘配額限制，Popup 介面即時動態倒數冷卻並自動接續重試，保證不報錯、不中斷。
 
-3. **🤖 DOM 自動化一鍵在 YouTube 建立清單 (`Step 2`)**：
+3. **🤖 DOM 自動化一鍵在 YouTube 建立清單**：
    - 每個分類卡片支援一鍵「**➕ 建立清單**」功能。
-   - 自動在 YouTube 介面模擬建立全新播放清單、設定自訂隱私度（私人 / 不公開 / 公開）。
+   - 自動在 YouTube 帳號模擬建立全新播放清單、設定自訂隱私度（私人 / 不公開 / 公開）。
    - 智慧定位影片 DOM 節點，批次自動勾選並加入該分類的所有影片。
-   - 具備 600ms~1000ms 操作延遲節流，防止 YouTube 頻率限制或動畫卡死。
 
-4. **⚡ 0 Token 快速擷取原始清單（免 API Key 快速備份）**：
+4. **⚡ 0 Token 快速純擷取（免 API Key 快速備份）**：
    - 提供「**⚡ 僅擷取 (0 Token 匯出)**」功能，無須消耗任何 AI Tokens 或填寫 API Key。
    - 秒級自動滾動載入完整清單的所有影片，並一鍵匯出為 **Markdown 報表、JSON 或 CSV** 試算表。
 
 5. **📂 支援 JSON / CSV 檔案直接匯入（0 Token 消耗）**：
    - 支援將先前匯出的 `.json` 或 `.csv` 分類檔案直接匯入回擴充功能。
-   - 匯入後瞬間還原分類卡片，直接跳過 AI 分析階段（0 API Token 消耗）。
-   - 每個分類卡片皆可一鍵點擊「**➕ 建立清單**」自動建立到 YouTube 帳號中。
+   - 匯入後瞬間還原分類卡片，直接跳過 AI 分析階段。
 
 6. **🔔 Chrome 桌面通知即時提醒**：
    - 支援背景分析完成或異常中斷時自動發送系統桌面通知，無需盯著視窗等待。
 
-7. **🎨 現代化深色 UI (`popup.html` & `popup.css`)**：
-   - 即時分頁狀態偵測（非 YouTube 清單時友善提示並禁用按鈕）。
+7. **🎨 現代化深色 UI**：
+   - 即時分頁狀態與平台辨識（自動切換 🔴 YouTube / 🔵 Bilibili 徽章）。
    - 雙階段進度條（DOM 擷取進度 ➔ AI 批次分類進度）。
-   - 手風琴式分類卡片（依影片數量自動排序、支援展開/收合、點擊直達 YouTube 影片）。
+   - 手風琴式分類卡片（依影片數量自動排序、支援展開/收合、點擊直達影片）。
    - 多種格式匯出：**📋 一鍵複製 Markdown**、**💾 匯出 JSON**、**📊 匯出 CSV**。
 
 8. **🔒 安全與隱私保護**：
    - API Key 僅儲存於使用者本機 `chrome.storage.local`，絕不上傳任何第三方伺服器。
-
----
-
-## 📁 檔案架構
-
-```text
-YoutubePlaylistManager/
-├── manifest.json            # Manifest V3 擴充功能配置檔
-├── popup/
-│   ├── popup.html           # 擴充功能彈出視窗介面 (Popup)
-│   ├── popup.css            # 現代化深色主題樣式與動畫
-│   └── popup.js             # 主邏輯 (狀態控制、LLM 分類、匯出)
-├── scripts/
-│   └── content.js           # YouTube 頁面爬蟲與自動滾動腳本
-├── background/
-│   └── background.js        # Service Worker 背景腳本
-├── icons/
-│   ├── icon16.png           # 16x16 擴充功能圖示
-│   ├── icon48.png           # 48x48 擴充功能圖示
-│   └── icon128.png          # 128x128 擴充功能圖示
-├── .gitignore               # Git 忽略檔案配置
-└── README.md                # 專案說明與使用手冊
-```
 
 ---
 
@@ -86,7 +61,7 @@ YoutubePlaylistManager/
 3. 開啟右上角的「**開發者模式** (Developer mode)」。
 4. 點選左上角的「**載入未封裝項目** (Load unpacked)」。
 5. 選擇本專案所在資料夾（即包含 `manifest.json` 的目錄）。
-6. 安裝完成後，即可在瀏覽器工具列中看見「**YouTube 播放清單 AI 分類器**」圖示。建議將其固定 (Pin) 到工具列以方便使用。
+6. 安裝完成後，即可在瀏覽器工具列中看見擴充功能圖示。建議將其固定 (Pin) 到工具列以方便使用。
 
 ---
 
@@ -108,22 +83,22 @@ YoutubePlaylistManager/
 
 ## 📖 使用教學
 
-1. **開啟目標播放清單**：
-   - 在 Chrome 中開啟任意 YouTube 播放清單頁面（例：`https://www.youtube.com/playlist?list=...`）。
+1. **開啟目標播放清單或收藏夾**：
+   - **YouTube**：開啟播放清單頁面（例：`https://www.youtube.com/playlist?list=...`）。
+   - **Bilibili**：開啟個人空間收藏夾（例：`https://space.bilibili.com/<uid>/favlist`）。
 2. **開啟擴充功能**：
-   - 點擊工具列上的擴充功能圖示。
+   - 點擊工具列上的擴充功能圖示，介面將自動識別平台並標註徽章。
 3. **完成初次設定**：
    - 點擊右上角「⚙️」開啟偏好設定。
-   - 選擇模型（預設推薦 `Gemini 3.6 Flash`，亦可切換為其他模型或自訂 ID）。
+   - 選擇模型（預設推薦 `Gemini 3.6 Flash`）。
    - 貼上您的 API Key。
-   - 依需求自訂分類標籤（例：`程式開發, 投資理財, 流行音樂, 遊戲動漫, 生活雜談, 其他`）或點擊快速預設按鈕。
-   - 點擊「💾 儲存設定」。
+   - 依需求自訂分類標籤或點擊快速預設按鈕，點擊「💾 儲存設定」。
 4. **開始分析**：
    - 點擊「🚀 **開始擷取並進行 AI 分類**」大按鈕。
-   - 擴充功能將自動在背景平滑滾動 YouTube 頁面擷取影片，並分批送交 AI 分析。
+   - 擴充功能將在背景自動滾動/翻頁擷取影片，並分批送交 AI 分析。
 5. **檢視與匯出**：
    - 分析完成後，可點擊各分類展開查看影片列表。
-   - 點擊「📋 複製 Markdown」即可貼到 Notion、Obsidian 或筆記軟體中。
+   - 點擊「📋 複製 Markdown」即可貼到 Notion、Obsidian 等筆記軟體。
    - 亦可點擊「💾 匯出 JSON」或「📊 匯出 CSV」保存完整結構化資料。
 
 ---

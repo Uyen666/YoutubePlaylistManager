@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "YouTube 播放清單 AI 分類器",
-  "version": "1.0.0",
-  "description": "自動擷取 YouTube 播放清單中的影片，透過 Gemini 或 OpenAI LLM 進行智慧分類並匯出結構化報表。",
+  "name": "YouTube & Bilibili 播放清單/收藏夾 AI 分類器",
+  "version": "1.1.0",
+  "description": "自動擷取 YouTube 播放清單與 Bilibili 收藏夾中的影片，透過 Gemini 或 OpenAI LLM 進行智慧語意分類並匯出結構化報表。",
   "permissions": [
     "activeTab",
     "scripting",
@@ -11,12 +11,13 @@
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
+    "https://*.bilibili.com/*",
     "https://generativelanguage.googleapis.com/*",
     "https://api.openai.com/*"
   ],
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "YouTube 播放清單 AI 分類器",
+    "default_title": "YouTube & Bilibili AI 分類器",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
@@ -29,7 +30,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.youtube.com/*"
+        "https://www.youtube.com/*",
+        "https://*.bilibili.com/*"
       ],
       "js": [
         "scripts/content.js"

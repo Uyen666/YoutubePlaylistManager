@@ -132,7 +132,9 @@ async function updateTaskState(partialState) {
  * 背景核心流程：擷取 DOM ➔ 批次 LLM 智慧分類 ➔ 持久化儲存
  */
 async function handleStartAnalysis(params) {
-  const { tabId, playlistUrl, playlistTitle, maxItems, categories, provider, customModel, apiKey } = params;
+  const { tabId, playlistUrl, playlistTitle, maxItems, categories, provider, customModel, apiKey, platform } = params;
+  const isBilibili = platform === 'bilibili' || (playlistUrl && playlistUrl.includes('bilibili.com'));
+  const platformName = isBilibili ? 'Bilibili 收藏夾' : 'YouTube 播放清單';
 
   // 1. 防重入鎖定：若已經在執行中，直接拒絕再次觸發以節省 Token
   if (isTaskRunning) {
@@ -153,7 +155,7 @@ async function handleStartAnalysis(params) {
     playlistUrl,
     playlistTitle,
     progressPercent: 5,
-    statusTitle: '步驟 1/2: 正在擷取播放清單...',
+    statusTitle: `步驟 1/2: 正在擷取 ${platformName}...`,
     statusDetail: '啟動自動滾動爬蟲...',
     categorizedResults: {},
     totalVideos: 0,
