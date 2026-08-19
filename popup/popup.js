@@ -571,6 +571,7 @@ document.addEventListener('DOMContentLoaded', () => {
         statusDetail: `已成功擷取「${playlistName}」共 ${scrapedVideos.length} 部影片`,
         playlistUrl: currentTab.url,
         playlistTitle: playlistName,
+        platform: response.platform || currentDetectedPlatform || 'youtube',
         totalVideos: scrapedVideos.length,
         categorizedResults,
         categorizedVideos: scrapedVideos,
@@ -796,8 +797,23 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ==========================================
-  // 匯出功能 (Markdown, JSON, CSV)
+  // 匯出功能 (Markdown, JSON, CSV) - 支援平台辨識與檔名區分
   // ==========================================
+  function getExportFileName(extension) {
+    const platform = currentDetectedPlatform || (currentCachedTask?.platform) || 'youtube';
+    const isBili = platform === 'bilibili';
+    const rawTitle = currentPlaylistTitle?.textContent || (isBili ? 'Bilibili收藏夾' : 'YouTube清單');
+    const safeTitle = rawTitle
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/\s+/g, '_')
+      .substring(0, 35);
+
+    const prefix = isBili ? 'bilibili_favlist' : 'youtube_playlist';
+    const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+    return `${prefix}_${safeTitle}_${dateStr}.${extension}`;
+  }
+
   async function copyAsMarkdown() {
     const task = currentCachedTask;
     if (!task || !task.categorizedResults || Object.keys(task.categorizedResults).length === 0) {
@@ -805,13 +821,19 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const platform = currentDetectedPlatform || task.platform || 'youtube';
+    const isBili = platform === 'bilibili';
+    const platformIcon = isBili ? '📺' : '🎬';
+    const platformLabel = isBili ? 'Bilibili 收藏夾' : 'YouTube 播放清單';
+
     const dateStr = new Date(task.completedAt || Date.now()).toLocaleString('zh-TW');
     const playlistName = currentPlaylistTitle.textContent;
     const providerName = getProviderDisplayName(providerSelect.value, customModelInput.value.trim());
 
-    let md = `# 🎬 YouTube 播放清單分類報表：${playlistName}\n\n`;
+    let md = `# ${platformIcon} ${platformLabel}分類報表：${playlistName}\n\n`;
+    md += `- **平台來源**：${isBili ? 'Bilibili (B站)' : 'YouTube'}\n`;
     md += `- **總影片數**：${task.totalVideos || 0} 部\n`;
-    md += `- **分析模型**：${providerName}\n`;
+    md += `- **分析模型**：${task.model || providerName}\n`;
     md += `- **生成時間**：${dateStr}\n\n`;
     md += `---\n\n`;
 
@@ -820,14 +842,15 @@ document.addEventListener('DOMContentLoaded', () => {
       md += `## 📁 ${catName} (${vList.length} 部)\n\n`;
       vList.forEach((v, idx) => {
         const durText = v.duration && v.duration !== 'N/A' ? ` [${v.duration}]` : '';
-        md += `${idx + 1}. [${v.title}](${v.url}) - *${v.channelTitle}*${durText}\n`;
+        const author = v.channelTitle || (isBili ? '未知UP主' : '未知頻道');
+        md += `${idx + 1}. [${v.title}](${v.url}) - *${author}*${durText}\n`;
       });
       md += `\n`;
     }
 
     try {
       await navigator.clipboard.writeText(md);
-      showToast('📋 已複製 Markdown 報表至剪貼簿！');
+      showToast(`📋 已複製 ${isBili ? 'B站' : 'YouTube'} Markdown 報表至剪貼簿！`);
     } catch (err) {
       console.error('複製 Markdown 失敗:', err);
       showToast('❌ 複製失敗，請手動複製');
@@ -841,7 +864,11 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const platform = currentDetectedPlatform || task.platform || 'youtube';
+    const isBili = platform === 'bilibili';
+
     const exportData = {
+      platform: isBili ? 'bilibili' : 'youtube',
       playlistTitle: currentPlaylistTitle.textContent,
       exportedAt: new Date().toISOString(),
       model: task.model || providerSelect.value,
@@ -849,9 +876,10 @@ document.addEventListener('DOMContentLoaded', () => {
       categories: task.categorizedResults
     };
 
+    const fileName = getExportFileName('json');
     const jsonStr = JSON.stringify(exportData, null, 2);
-    downloadFile(jsonStr, 'youtube_playlist_categorized.json', 'application/json');
-    showToast('💾 已下載 JSON 檔案');
+    downloadFile(jsonStr, fileName, 'application/json');
+    showToast(`💾 已下載 ${isBili ? 'B站' : 'YouTube'} JSON 檔案 (${fileName})`);
   }
 
   function exportAsCsv() {
@@ -861,15 +889,20 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const platform = currentDetectedPlatform || task.platform || 'youtube';
+    const isBili = platform === 'bilibili';
+
     let csvContent = '\uFEFF'; // 加入 BOM 防止 Excel 亂碼
-    csvContent += 'VideoId,Title,Channel,Duration,Category,URL\n';
+    csvContent += isBili
+      ? 'BVID,Title,UP,Duration,Category,URL\n'
+      : 'VideoId,Title,Channel,Duration,Category,URL\n';
 
     for (const [catName, vList] of Object.entries(task.categorizedResults)) {
       if (!vList) continue;
       vList.forEach(v => {
         const escapeCsv = (str) => `"${(str || '').replace(/"/g, '""')}"`;
         csvContent += [
-          escapeCsv(v.videoId),
+          escapeCsv(v.videoId || v.bvid || v.id),
           escapeCsv(v.title),
           escapeCsv(v.channelTitle),
           escapeCsv(v.duration),
@@ -879,8 +912,9 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    downloadFile(csvContent, 'youtube_playlist_categorized.csv', 'text/csv;charset=utf-8;');
-    showToast('📊 已下載 CSV 檔案');
+    const fileName = getExportFileName('csv');
+    downloadFile(csvContent, fileName, 'text/csv;charset=utf-8;');
+    showToast(`📊 已下載 ${isBili ? 'B站' : 'YouTube'} CSV 檔案 (${fileName})`);
   }
 
   function downloadFile(content, filename, mimeType) {
