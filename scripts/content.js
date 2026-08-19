@@ -233,14 +233,56 @@
   }
 
   // ==========================================
-  // Step 2 DOM 自動化：建立播放清單與批次加入影片
+  // Step 2 DOM 自動化：建立播放清單與批次加入影片 (含 3 大安全防護機制)
   // ==========================================
 
   /**
-   * 輔助延遲函式
+   * 安全防護 1: 擬人化隨機非同步延遲 (Randomized Delay)
+   * 避免規律時間間隔被 YouTube 行為特徵偵測系統識別
    */
+  function randomDelay(minMs = 800, maxMs = 1500) {
+    const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+    return new Promise(resolve => setTimeout(resolve, delay));
+  }
+
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 安全防護 3: 錯誤與驗證碼立即中斷機制 (Fail-Fast Interceptor)
+   * 偵測 429 Too Many Requests、Google CAPTCHA 或異常提示，立即中斷防止帳號風險
+   */
+  function detectYouTubeRateLimitOrCaptcha() {
+    // A. 偵測 Google / reCAPTCHA 驗證碼彈窗或 iframe
+    const captchaEl = document.querySelector('iframe[src*="recaptcha"], iframe[src*="captcha"], #captcha-container, .g-recaptcha, #recaptcha');
+    if (captchaEl && captchaEl.offsetParent !== null) {
+      return '⚠️ 偵測到 YouTube 驗證碼 (CAPTCHA) 彈窗，已緊急中斷自動化，請手動完成驗證！';
+    }
+
+    // B. 偵測 YouTube 限制提示 Toast 或通知列
+    const toasts = document.querySelectorAll('tp-yt-paper-toast, ytd-notification-action-renderer, yt-notification-action-renderer, #notification');
+    for (const toast of toasts) {
+      const text = (toast.textContent || '').trim();
+      if (
+        text.includes('操作過於頻繁') ||
+        text.includes('請稍後再試') ||
+        text.includes('Too many requests') ||
+        text.includes('Try again later') ||
+        text.includes('無法將影片加入') ||
+        text.includes('The action cannot be performed') ||
+        text.includes('429')
+      ) {
+        return `⚠️ YouTube 提示頻率過高或受限：「${text}」，已安全中斷自動化！`;
+      }
+    }
+
+    // C. 偵測異常流量阻擋頁面
+    if (document.title.includes('Robot') || document.body.innerText.includes('Our systems have detected unusual traffic')) {
+      return '⚠️ 偵測到 YouTube 異常流量偵測警告，已立即安全中斷！';
+    }
+
+    return null;
   }
 
   /**
@@ -276,20 +318,18 @@
    * 關閉目前開啟的 YouTube 彈窗或對話框
    */
   async function closeOpenDialogs() {
-    // 1. 嘗試尋找關閉按鈕
     const closeBtn = document.querySelector('ytd-add-to-playlist-renderer #close-button button') ||
                      document.querySelector('ytd-add-to-playlist-renderer button[aria-label*="關閉"]') ||
                      document.querySelector('ytd-add-to-playlist-renderer button[aria-label*="Close"]') ||
                      document.querySelector('tp-yt-paper-dialog button#button');
     if (closeBtn) {
       simulateClick(closeBtn);
-      await sleep(400);
+      await randomDelay(400, 600);
       return;
     }
 
-    // 2. 發送 ESC 鍵關閉
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-    await sleep(400);
+    await randomDelay(400, 600);
   }
 
   /**
@@ -324,7 +364,7 @@
     // 若當前 DOM 沒找到，嘗試滾動頁面加載
     if (!foundEl) {
       window.scrollBy({ top: 1200, behavior: 'smooth' });
-      await sleep(700);
+      await randomDelay(800, 1200);
       const retryElements = document.querySelectorAll(selectors.join(', '));
       for (const el of retryElements) {
         const link = el.querySelector('a#video-title') || el.querySelector('a#thumbnail') || el.querySelector('a[href*="/watch"]');
@@ -340,21 +380,42 @@
   }
 
   /**
-   * 自動建立 YouTube 播放清單並批次加入分類影片
+   * 自動建立 YouTube 播放清單並批次加入分類影片 (嚴密落實 3 大安全防護)
    */
   async function createCategoryPlaylist(categoryName, privacy = 'PRIVATE', videos = [], onProgress = null) {
     if (!videos || videos.length === 0) {
       throw new Error('分類中無影片可加入');
     }
 
-    console.log(`[YT-AI-Classifier:DOM-Automation] Starting creation for "${categoryName}" with ${videos.length} videos. Privacy: ${privacy}`);
+    console.log(`[YT-AI-Classifier:DOM-Automation] Starting creation for "${categoryName}" (${videos.length} videos). Privacy: ${privacy}`);
 
     let addedCount = 0;
     let failedCount = 0;
     let playlistCreated = false;
 
+    // 安全防護 2: 批次處理冷卻間隔 (每 25 部影片暫停 3~5 秒)
+    const BATCH_SIZE = 25;
+
     for (let i = 0; i < videos.length; i++) {
       const video = videos[i];
+
+      // 檢查安全防護 3: 驗證碼或 429 頻率偵測
+      const securityIssue = detectYouTubeRateLimitOrCaptcha();
+      if (securityIssue) {
+        await closeOpenDialogs();
+        throw new Error(securityIssue);
+      }
+
+      // 檢查安全防護 2: 批次冷卻
+      if (i > 0 && i % BATCH_SIZE === 0) {
+        const batchCoolDown = Math.floor(Math.random() * 2000) + 3000; // 3000ms ~ 5000ms
+        console.log(`[YT-AI-Classifier:Security] Batch limit reached (${i} items). Cooling down for ${batchCoolDown}ms...`);
+        if (onProgress) {
+          onProgress(i, videos.length, `⏸️ 防護冷卻中 (暫停 ${(batchCoolDown / 1000).toFixed(1)} 秒，避免 YouTube 頻率限制)...`);
+        }
+        await sleep(batchCoolDown);
+      }
+
       if (onProgress) {
         onProgress(i + 1, videos.length, video.title);
       }
@@ -370,9 +431,16 @@
           continue;
         }
 
-        // 2. 平滑滾動至可視區域
+        // 2. 平滑滾動至可視區域 (安全防護 1: 擬人化隨機延遲 800~1500ms)
         videoEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        await sleep(600);
+        await randomDelay(800, 1200);
+
+        // 再次檢查是否有驗證碼彈出
+        const check1 = detectYouTubeRateLimitOrCaptcha();
+        if (check1) {
+          await closeOpenDialogs();
+          throw new Error(check1);
+        }
 
         // 3. 點擊影片右側三點選單按鈕
         const menuBtn = videoEl.querySelector('button.yt-icon-button#button') ||
@@ -389,7 +457,7 @@
         }
 
         simulateClick(menuBtn);
-        await sleep(700);
+        await randomDelay(800, 1300);
 
         // 4. 在彈出選單中尋找並點擊「儲存至播放清單」
         const saveItem = await waitForElement(() => {
@@ -418,7 +486,7 @@
         }
 
         simulateClick(saveItem);
-        await sleep(900);
+        await randomDelay(900, 1400);
 
         // 5. 等待「儲存至播放清單」對話框彈出
         const dialog = await waitForElement(() => {
@@ -436,7 +504,6 @@
         // 分支 A: 第一部影片 -> 建立新播放清單
         // ----------------------------------------------------
         if (!playlistCreated) {
-          // 檢查是否已存在同名清單
           const existingOption = findPlaylistOptionInDialog(dialog, categoryName);
 
           if (existingOption) {
@@ -446,7 +513,6 @@
           } else {
             console.log(`[YT-AI-Classifier:DOM-Automation] Creating new playlist "${categoryName}"...`);
 
-            // 尋找「建立新的播放清單」按鈕
             const createNewBtn = dialog.querySelector('ytd-add-to-playlist-create-renderer button') ||
                                  dialog.querySelector('button[aria-label*="建立新"]') ||
                                  dialog.querySelector('button[aria-label*="Create new"]') ||
@@ -454,9 +520,8 @@
 
             if (createNewBtn) {
               simulateClick(createNewBtn);
-              await sleep(700);
+              await randomDelay(800, 1200);
 
-              // 填寫清單標題
               const nameInput = dialog.querySelector('input#input-1') ||
                                 dialog.querySelector('tp-yt-paper-input input') ||
                                 dialog.querySelector('input[type="text"]') ||
@@ -467,26 +532,24 @@
                 nameInput.value = categoryName;
                 nameInput.dispatchEvent(new Event('input', { bubbles: true }));
                 nameInput.dispatchEvent(new Event('change', { bubbles: true }));
-                await sleep(500);
+                await randomDelay(600, 900);
 
-                // 設定隱私度 (若可選)
                 const privacyDropdown = dialog.querySelector('tp-yt-paper-dropdown-menu, #privacy-picker, ytd-privacy-dropdown-item-renderer');
                 if (privacyDropdown && privacy !== 'PUBLIC') {
                   simulateClick(privacyDropdown);
-                  await sleep(500);
+                  await randomDelay(500, 800);
                   const privacyOption = document.querySelector(`tp-yt-paper-item[value="${privacy}"], tp-yt-paper-listbox tp-yt-paper-item`);
                   if (privacyOption) simulateClick(privacyOption);
-                  await sleep(400);
+                  await randomDelay(400, 600);
                 }
 
-                // 點擊「建立」按鈕
                 const confirmCreateBtn = dialog.querySelector('tp-yt-paper-button#button') ||
                                          dialog.querySelector('ytd-button-renderer#create-button button') ||
                                          findButtonByText(dialog, ['建立', 'Create', '作成', '创建']);
 
                 if (confirmCreateBtn) {
                   simulateClick(confirmCreateBtn);
-                  await sleep(1400);
+                  await randomDelay(1200, 1600);
                   playlistCreated = true;
                   console.log(`[YT-AI-Classifier:DOM-Automation] Playlist "${categoryName}" created successfully!`);
                 }
@@ -497,7 +560,7 @@
           // ----------------------------------------------------
           // 分支 B: 後續影片 -> 勾選現有分類清單
           // ----------------------------------------------------
-          await sleep(500);
+          await randomDelay(600, 900);
           const targetOption = findPlaylistOptionInDialog(dialog, categoryName);
 
           if (targetOption) {
@@ -509,12 +572,18 @@
 
         addedCount++;
         await closeOpenDialogs();
-        await sleep(600); // 平滑節流間隔
+        // 安全防護 1: 每次加入完成後隨機等待 800ms ~ 1500ms
+        await randomDelay(800, 1500);
 
       } catch (videoErr) {
         console.error(`[YT-AI-Classifier:DOM-Automation] Error processing video ${video.title}:`, videoErr);
         await closeOpenDialogs();
         failedCount++;
+
+        // 如果是安全防護錯誤，立即向外拋出中斷整個流程
+        if (videoErr.message && (videoErr.message.includes('CAPTCHA') || videoErr.message.includes('頻率') || videoErr.message.includes('受限') || videoErr.message.includes('異常'))) {
+          throw videoErr;
+        }
       }
     }
 
