@@ -233,6 +233,12 @@ async function handleStartAnalysis(params) {
       completedAt: Date.now()
     });
 
+    const activeCatCount = Object.keys(categorizedResults).filter(c => (categorizedResults[c] || []).length > 0).length;
+    sendDesktopNotification(
+      '🎉 YouTube 清單 AI 分類完成！',
+      `已成功將「${playlistTitle || '播放清單'}」的 ${scrapedVideos.length} 部影片歸納至 ${activeCatCount} 個分類。點擊擴充功能即可查看成果！`
+    );
+
     console.log('[YT-AI-Classifier:Background] Classification completed and saved to storage.');
     return { success: true };
 
@@ -244,10 +250,47 @@ async function handleStartAnalysis(params) {
       statusDetail: err.message,
       error: err.message
     });
+
+    if (err.message !== '任務已被使用者取消') {
+      sendDesktopNotification(
+        '⚠️ YouTube 清單分類中斷',
+        `中斷原因: ${err.message}`,
+        true
+      );
+    }
+
     return { success: false, error: err.message };
   } finally {
     isTaskRunning = false;
   }
+}
+
+/**
+ * 發送 Chrome 系統桌面通知
+ */
+function sendDesktopNotification(title, message, isError = false) {
+  try {
+    if (!chrome.notifications) return;
+
+    const notificationId = `yt_ai_notif_${Date.now()}`;
+    chrome.notifications.create(notificationId, {
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title,
+      message,
+      priority: 2,
+      requireInteraction: false
+    });
+  } catch (err) {
+    console.warn('[YT-AI-Classifier:Background] Notification trigger failed:', err);
+  }
+}
+
+// 監聽通知點擊事件
+if (chrome.notifications && chrome.notifications.onClicked) {
+  chrome.notifications.onClicked.addListener((notifId) => {
+    console.log('[YT-AI-Classifier:Background] User clicked notification:', notifId);
+  });
 }
 
 // ==========================================
