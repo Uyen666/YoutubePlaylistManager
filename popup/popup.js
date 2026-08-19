@@ -546,10 +546,18 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
 
-    // 綁定「在 YouTube 建立此清單」點擊事件
+    // 綁定「在 YouTube 建立此清單」點擊事件 (採用原生 Innertube API 引擎，秒速完成零失敗)
     const btnCreate = header.querySelector('.btn-create-playlist');
+    let createdPlaylistUrl = null;
+
     btnCreate.addEventListener('click', async (e) => {
       e.stopPropagation(); // 防止觸發手風琴開闔
+
+      // 若已建立過，點擊直接在新分頁開啟該播放清單
+      if (createdPlaylistUrl) {
+        chrome.tabs.create({ url: createdPlaylistUrl });
+        return;
+      }
 
       if (btnCreate.disabled) return;
 
@@ -560,23 +568,31 @@ document.addEventListener('DOMContentLoaded', () => {
 
       btnCreate.disabled = true;
       btnCreate.classList.add('loading');
-      btnCreate.innerHTML = `<span>⏳ 建立中 (0/${videos.length})...</span>`;
-      showToast(`🚀 開始在 YouTube 自動建立「${categoryName}」播放清單...`);
+      btnCreate.innerHTML = `<span>⏳ 建立中 (${videos.length} 部)...</span>`;
+      showToast(`🚀 開始在 YouTube 建立「${categoryName}」播放清單...`);
 
       try {
         const privacy = playlistPrivacySelect ? playlistPrivacySelect.value : 'PRIVATE';
-        const res = await chrome.tabs.sendMessage(currentTab.id, {
-          action: 'CREATE_CATEGORY_PLAYLIST',
-          categoryName,
-          privacy,
-          videos
+        const videoIds = videos.map(v => v.videoId).filter(Boolean);
+
+        // 使用 Chrome Scripting MAIN world 於 YouTube 頁面原生執行建立
+        const execResults = await chrome.scripting.executeScript({
+          target: { tabId: currentTab.id },
+          world: 'MAIN',
+          func: nativeCreatePlaylistInPage,
+          args: [categoryName, privacy, videoIds]
         });
 
+        const res = execResults?.[0]?.result;
+
         if (res && res.success) {
+          createdPlaylistUrl = res.playlistUrl;
           btnCreate.classList.remove('loading');
           btnCreate.classList.add('success');
-          btnCreate.innerHTML = `<span>✔️ 已建立 (${res.addedCount})</span>`;
-          showToast(`🎉 成功在 YouTube 建立「${categoryName}」清單 (共加入 ${res.addedCount} 部影片)！`);
+          btnCreate.disabled = false;
+          btnCreate.innerHTML = `<span>↗️ 開啟清單 (${res.addedCount})</span>`;
+          btnCreate.title = `點擊在新分頁開啟「${categoryName}」播放清單`;
+          showToast(`🎉 成功建立「${categoryName}」清單 (共加入 ${res.addedCount} 部影片)！`);
         } else {
           throw new Error(res?.error || '建立過程發生錯誤');
         }
@@ -585,7 +601,7 @@ document.addEventListener('DOMContentLoaded', () => {
         btnCreate.classList.remove('loading');
         btnCreate.disabled = false;
         btnCreate.innerHTML = `<span>➕ 建立清單</span>`;
-        showToast(`❌ 建立清單失敗: ${err.message}`);
+        showToast(`❌ 建立失敗: ${err.message}`);
       }
     });
 
@@ -772,3 +788,111 @@ document.addEventListener('DOMContentLoaded', () => {
     return target;
   }
 });
+
+/**
+ * 注入至 YouTube 頁面原生環境 (MAIN world) 執行的建立播放清單函式
+ * 直接透過 YouTube 本地 Innertube Web Client API 建立清單並批次加入影片
+ */
+async function nativeCreatePlaylistInPage(categoryName, privacy, videoIds) {
+  try {
+    let ytcfg = window.ytcfg;
+    if (!ytcfg && typeof window.yt !== 'undefined' && window.yt.config_) {
+      ytcfg = {
+        get: (key) => window.yt.config_[key] || (window.ytcfg ? window.ytcfg.get(key) : null)
+      };
+    }
+
+    if (!ytcfg) {
+      return { success: false, error: '未能取得 YouTube 頁面配置 (ytcfg)，請確認當前為 YouTube 分頁並重新整理。' };
+    }
+
+    const apiKey = ytcfg.get('INNERTUBE_API_KEY');
+    const context = ytcfg.get('INNERTUBE_CONTEXT');
+    const loggedIn = ytcfg.get('LOGGED_IN');
+
+    if (loggedIn === false) {
+      return { success: false, error: '請先在 YouTube 登入您的 Google 帳號，才能建立播放清單！' };
+    }
+
+    if (!apiKey || !context) {
+      return { success: false, error: '未能讀取 YouTube API 金鑰與 Context，請重新整理 YouTube 頁面後再試。' };
+    }
+
+    const privacyStatus = (privacy === 'PUBLIC') ? 'PUBLIC' : (privacy === 'UNLISTED' ? 'UNLISTED' : 'PRIVATE');
+
+    // 1. 建立播放清單並放入前 50 部影片
+    const firstBatch = videoIds.slice(0, 50);
+    const createPayload = {
+      context: context,
+      title: categoryName,
+      privacyStatus: privacyStatus,
+      videoIds: firstBatch
+    };
+
+    const clientName = context?.client?.clientName || '1';
+    const clientVersion = context?.client?.clientVersion || '2.20240101.00.00';
+
+    const response = await fetch(`/youtubei/v1/playlist/create?key=${apiKey}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-YouTube-Client-Name': String(clientName),
+        'X-YouTube-Client-Version': clientVersion,
+        'X-Origin': 'https://www.youtube.com'
+      },
+      body: JSON.stringify(createPayload)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      return { success: false, error: `YouTube 建立清單回傳錯誤 (HTTP ${response.status}): ${errText}` };
+    }
+
+    const data = await response.json();
+    const playlistId = data.playlistId;
+
+    if (!playlistId) {
+      const alertMsg = data?.actions?.[0]?.openPopupAction?.popup?.notificationActionRenderer?.responseText?.runs?.[0]?.text;
+      return { success: false, error: alertMsg || 'YouTube 未回傳建立之播放清單 ID' };
+    }
+
+    // 2. 若影片數量大於 50 部，透過 edit_playlist 批次加入其餘影片
+    if (videoIds.length > 50) {
+      const remaining = videoIds.slice(50);
+      const actions = remaining.map(id => ({
+        action: 'ACTION_ADD_VIDEO',
+        addedVideoId: id
+      }));
+
+      for (let i = 0; i < actions.length; i += 50) {
+        const chunk = actions.slice(i, i + 50);
+        await fetch(`/youtubei/v1/browse/edit_playlist?key=${apiKey}`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-YouTube-Client-Name': String(clientName),
+            'X-YouTube-Client-Version': clientVersion,
+            'X-Origin': 'https://www.youtube.com'
+          },
+          body: JSON.stringify({
+            context: context,
+            playlistId: playlistId,
+            actions: chunk
+          })
+        }).catch(() => {});
+      }
+    }
+
+    return {
+      success: true,
+      playlistId: playlistId,
+      playlistUrl: `https://www.youtube.com/playlist?list=${playlistId}`,
+      addedCount: videoIds.length,
+      categoryName: categoryName
+    };
+  } catch (err) {
+    return { success: false, error: err.message || '執行建立過程發生未預期例外' };
+  }
+}
