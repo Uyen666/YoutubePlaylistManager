@@ -776,7 +776,19 @@
           }
         }
 
-        const srcMediaId = this.detectMediaId ? this.detectMediaId() : null;
+        let srcMediaId = this.detectMediaId ? this.detectMediaId() : null;
+        if (!srcMediaId && userMid) {
+          try {
+            const listRes = await fetch(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${userMid}`, {
+              credentials: 'include'
+            });
+            const listData = await listRes.json();
+            if (listData.code === 0 && Array.isArray(listData.data?.list) && listData.data.list.length > 0) {
+              srcMediaId = listData.data.list[0].id;
+            }
+          } catch (_) {}
+        }
+
         let addedSuccessCount = 0;
 
         if (srcMediaId && aids.length > 0) {
@@ -820,6 +832,7 @@
 
         if (addedSuccessCount < aids.length) {
           const remainingAids = (addedSuccessCount === 0) ? aids : aids.slice(addedSuccessCount);
+          const targetAddIds = srcMediaId ? `${srcMediaId},${folderId}` : String(folderId);
           const concurrency = 4;
           for (let i = 0; i < remainingAids.length; i += concurrency) {
             const chunk = remainingAids.slice(i, i + concurrency);
@@ -828,7 +841,7 @@
                 const dealParams = new URLSearchParams();
                 dealParams.append('rid', String(singleAid));
                 dealParams.append('type', '2');
-                dealParams.append('add_media_ids', String(folderId));
+                dealParams.append('add_media_ids', targetAddIds);
                 dealParams.append('del_media_ids', '');
                 dealParams.append('csrf', csrf);
 
@@ -842,7 +855,7 @@
                   body: dealParams.toString()
                 });
                 const singleData = await singleRes.json();
-                if (singleData.code === 0 || singleData.code === 11201) {
+                if (singleData.code === 0) {
                   addedSuccessCount++;
                 }
               } catch (_) {}

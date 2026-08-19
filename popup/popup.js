@@ -1526,22 +1526,48 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
       }
     }
 
-    // 探測當前來源收藏夾 ID
-    function detectSourceMediaId() {
-      const url = window.location.href;
-      const fidM = url.match(/[?&]fid=(\d+)/);
-      if (fidM) return fidM[1];
-      const mlM = url.match(/\/ml(\d+)/i);
-      if (mlM) return mlM[1];
-      const curItem = document.querySelector('.fav-item.cur, .fav-item.active, li.cur, .cur-list');
-      if (curItem) {
-        const df = curItem.getAttribute('data-fid') || curItem.getAttribute('fid');
-        if (df && /^\d+$/.test(df)) return df;
+    // 4. 透過官方 list-all API 精確獲取用戶收藏夾清單，以鎖定當前來源收藏夾 ID (srcMediaId)
+    let srcMediaId = null;
+    try {
+      if (userMid) {
+        const listRes = await fetch(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${userMid}`, {
+          credentials: 'include'
+        });
+        const listData = await listRes.json();
+        if (listData.code === 0 && Array.isArray(listData.data?.list) && listData.data.list.length > 0) {
+          const folders = listData.data.list;
+
+          const urlFid = (window.location.href.match(/[?&]fid=(\d+)/) || [])[1];
+          const urlMl = (window.location.href.match(/\/ml(\d+)/i) || [])[1];
+
+          const matched = folders.find(f =>
+            (urlFid && (String(f.fid) === urlFid || String(f.id) === urlFid)) ||
+            (urlMl && String(f.id) === urlMl)
+          );
+
+          if (matched) {
+            srcMediaId = matched.id;
+          } else {
+            // 嘗試匹配頁面上的收藏夾標題，若無則預設為第一個收藏夾 (預設收藏夾)
+            const pageTitle = (document.querySelector('.fav-main-title, .fav-name, .fav-item.cur .text, .cur-list .name')?.textContent || '').trim();
+            const titleMatched = folders.find(f => f.title && pageTitle && (f.title.trim() === pageTitle || pageTitle.includes(f.title.trim())));
+            srcMediaId = titleMatched ? titleMatched.id : folders[0].id;
+          }
+        }
       }
-      return null;
+    } catch (e) {
+      console.warn('[Bilibili:NativeEngine] Failed fetching fav folders list:', e);
     }
 
-    const srcMediaId = detectSourceMediaId();
+    // 若 API 未能取得，嘗試從 DOM 探測
+    if (!srcMediaId) {
+      const url = window.location.href;
+      const fidM = url.match(/[?&]fid=(\d+)/);
+      if (fidM) srcMediaId = fidM[1];
+      const mlM = url.match(/\/ml(\d+)/i);
+      if (mlM) srcMediaId = mlM[1];
+    }
+
     console.log(`[Bilibili:NativeEngine] Target Folder ID: ${folderId}, Source Media ID: ${srcMediaId}, User Mid: ${userMid}, Total AIDs: ${aids.length}`);
 
     let addedSuccessCount = 0;
@@ -1585,11 +1611,13 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
       }
     }
 
-    // 4.2 備援策略：若 copy 未涵蓋所有影片，使用 deal 單筆微批次加入
+    // 4.2 備援策略：若 copy 未涵蓋所有影片，使用 deal 加入 (同時保留來源收藏夾 ID 防止 11201 報錯)
     if (addedSuccessCount < aids.length) {
       const remainingAids = (addedSuccessCount === 0) ? aids : aids.slice(addedSuccessCount);
       console.log(`[Bilibili:NativeEngine] Running deal API for ${remainingAids.length} videos...`);
+      const targetAddIds = srcMediaId ? `${srcMediaId},${folderId}` : String(folderId);
       const concurrency = 4;
+
       for (let i = 0; i < remainingAids.length; i += concurrency) {
         const chunk = remainingAids.slice(i, i + concurrency);
         await Promise.all(chunk.map(async (singleAid) => {
@@ -1597,7 +1625,7 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
             const dealParams = new URLSearchParams();
             dealParams.append('rid', String(singleAid));
             dealParams.append('type', '2');
-            dealParams.append('add_media_ids', String(folderId));
+            dealParams.append('add_media_ids', targetAddIds);
             dealParams.append('del_media_ids', '');
             dealParams.append('csrf', csrf);
 
@@ -1613,7 +1641,7 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
 
             const singleData = await singleRes.json();
             console.log(`[Bilibili:NativeEngine] deal aid=${singleAid}:`, singleData);
-            if (singleData.code === 0 || singleData.code === 11201) {
+            if (singleData.code === 0) {
               addedSuccessCount++;
             }
           } catch (err) {
@@ -1639,7 +1667,7 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
       success: true,
       playlistId: String(folderId),
       playlistUrl: playlistUrl,
-      addedCount: addedSuccessCount || aids.length,
+      addedCount: addedSuccessCount,
       categoryName: categoryName,
       platform: 'bilibili'
     };
