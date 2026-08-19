@@ -729,7 +729,7 @@
           return { success: false, error: createData.message || `B站建立收藏夾失敗 (錯誤碼 ${createData.code})` };
         }
 
-        const folderId = createData.data.id;
+        const folderId = createData.data.id || createData.data.media_id;
         const userMid = createData.data.mid || '';
 
         const BILI_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
@@ -741,13 +741,22 @@
         const BILI_XOR = 177451812;
         const BILI_ADD = 8728348608;
 
-        function bvidToAid(bvid) {
-          if (!bvid) return null;
-          if (/^\d+$/.test(bvid)) return parseInt(bvid, 10);
-          if (/^av(\d+)$/i.test(bvid)) return parseInt(bvid.match(/^av(\d+)$/i)[1], 10);
-          let bvStr = bvid;
-          if (!bvStr.startsWith('BV') && !bvStr.startsWith('bv')) bvStr = 'BV' + bvStr;
-          if (bvStr.length !== 12) return null;
+        function bvidToAid(input) {
+          if (!input) return null;
+          if (typeof input === 'object') {
+            input = input.bvid || input.videoId || input.url || input.id || '';
+          }
+          const str = String(input).trim();
+          if (!str) return null;
+
+          if (/^\d+$/.test(str)) return parseInt(str, 10);
+          const avMatch = str.match(/av(\d+)/i);
+          if (avMatch) return parseInt(avMatch[1], 10);
+
+          const bvMatch = str.match(/(?:BV|bv)([a-zA-Z0-9]{10})/);
+          if (!bvMatch) return null;
+
+          const bvStr = 'BV' + bvMatch[1];
           let r = 0;
           for (let i = 0; i < 6; i++) {
             r += BILI_TR[bvStr[BILI_S[i]]] * Math.pow(58, i);
@@ -757,69 +766,51 @@
 
         const aids = [];
         for (const v of (videos || [])) {
-          const aid = bvidToAid(v.bvid || v.videoId || v.id || v);
+          const aid = bvidToAid(v);
           if (aid && typeof aid === 'number' && !isNaN(aid) && aid > 0) {
             aids.push(aid);
           }
         }
 
         let addedSuccessCount = 0;
-        if (aids.length > 0) {
-          const batchSize = 20;
-          for (let i = 0; i < aids.length; i += batchSize) {
-            const chunk = aids.slice(i, i + batchSize);
+        const concurrency = 4;
+        for (let i = 0; i < aids.length; i += concurrency) {
+          const chunk = aids.slice(i, i + concurrency);
+          await Promise.all(chunk.map(async (singleAid) => {
             try {
-              const batchParams = new URLSearchParams();
-              batchParams.append('resources', chunk.map(aid => `${aid}:2`).join(','));
-              batchParams.append('add_media_ids', String(folderId));
-              batchParams.append('del_media_ids', '');
-              batchParams.append('csrf', csrf);
+              const dealParams = new URLSearchParams();
+              dealParams.append('rid', String(singleAid));
+              dealParams.append('type', '2');
+              dealParams.append('add_media_ids', String(folderId));
+              dealParams.append('del_media_ids', '');
+              dealParams.append('csrf', csrf);
 
-              const batchRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/batch-deal', {
+              const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
                   'Accept': 'application/json, text/plain, */*'
                 },
                 credentials: 'include',
-                body: batchParams.toString()
+                body: dealParams.toString()
               });
-
-              const batchData = await batchRes.json();
-              if (batchData.code === 0) {
-                addedSuccessCount += chunk.length;
+              const singleData = await singleRes.json();
+              if (singleData.code === 0) {
+                addedSuccessCount++;
               } else {
-                for (const singleAid of chunk) {
-                  try {
-                    const dealParams = new URLSearchParams();
-                    dealParams.append('rid', String(singleAid));
-                    dealParams.append('type', '2');
-                    dealParams.append('add_media_ids', String(folderId));
-                    dealParams.append('csrf', csrf);
-
-                    const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                      credentials: 'include',
-                      body: dealParams.toString()
-                    });
-                    const singleData = await singleRes.json();
-                    if (singleData.code === 0) addedSuccessCount++;
-                    await sleep(120);
-                  } catch (_) {}
-                }
+                console.warn(`[BilibiliAdapter] Failed adding aid ${singleAid}:`, singleData);
               }
             } catch (err) {
-              console.warn('[BilibiliAdapter] Batch error:', err);
+              console.warn(`[BilibiliAdapter] Network error adding aid ${singleAid}:`, err);
             }
+          }));
 
-            if (onProgress) {
-              onProgress(Math.min(i + batchSize, aids.length), aids.length, categoryName);
-            }
+          if (onProgress) {
+            onProgress(Math.min(i + concurrency, aids.length), aids.length, categoryName);
+          }
 
-            if (i + batchSize < aids.length) {
-              await sleep(200);
-            }
+          if (i + concurrency < aids.length) {
+            await sleep(120);
           }
         }
 
