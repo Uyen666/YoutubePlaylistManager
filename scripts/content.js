@@ -31,17 +31,25 @@
    * @param {Element} element - ytd-playlist-video-renderer 或 ytd-playlist-panel-video-renderer
    * @returns {Object|null} 影片資訊物件
    */
+  /**
+   * 從 DOM 節點中提取單部影片資料
+   * @param {Element} element - 支援各版本 YouTube 播放清單與影片節點
+   * @returns {Object|null} 影片資訊物件
+   */
   function extractVideoData(element) {
     try {
-      // 1. 尋找標題元素
+      // 1. 尋找標題元素 (相容新舊 YouTube 佈局)
       const titleEl = element.querySelector('a#video-title') ||
                       element.querySelector('#video-title') ||
                       element.querySelector('span#video-title') ||
-                      element.querySelector('.yt-lockup-metadata-view-model-wiz__title');
+                      element.querySelector('.yt-lockup-metadata-view-model-wiz__title') ||
+                      element.querySelector('h3 a') ||
+                      element.querySelector('h3.title-and-badge') ||
+                      element.querySelector('a[aria-label][href*="/watch"]');
 
       if (!titleEl) return null;
 
-      const rawTitle = (titleEl.textContent || titleEl.getAttribute('title') || '').trim();
+      const rawTitle = (titleEl.textContent || titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || '').trim();
       if (!rawTitle) return null;
 
       // 過濾已被刪除或設為私人的影片
@@ -60,8 +68,11 @@
       // 2. 擷取影片連結與 VideoId
       let href = titleEl.getAttribute('href') || '';
       if (!href) {
-        const thumbLink = element.querySelector('a#thumbnail') || element.querySelector('a[href*="/watch"]');
-        if (thumbLink) href = thumbLink.getAttribute('href') || '';
+        const anyLink = element.querySelector('a[href*="/watch?v="]') ||
+                        element.querySelector('a#thumbnail') ||
+                        element.querySelector('a[href*="/shorts/"]') ||
+                        element.querySelector('a[href*="/watch"]');
+        if (anyLink) href = anyLink.getAttribute('href') || '';
       }
 
       let videoId = '';
@@ -86,6 +97,8 @@
                         element.querySelector('#byline-container a') ||
                         element.querySelector('#byline a') ||
                         element.querySelector('.ytd-channel-name') ||
+                        element.querySelector('.yt-lockup-metadata-view-model-wiz__metadata') ||
+                        element.querySelector('#text.ytd-channel-name') ||
                         element.querySelector('#channel-name');
       if (channelEl) {
         const channelText = (channelEl.textContent || '').trim();
@@ -97,6 +110,7 @@
       const durationEl = element.querySelector('ytd-thumbnail-overlay-time-status-renderer #text') ||
                          element.querySelector('span.ytd-thumbnail-overlay-time-status-renderer') ||
                          element.querySelector('span.badge-shape-wiz__text') ||
+                         element.querySelector('.badge-shape-wiz__text') ||
                          element.querySelector('#time-status #text');
       if (durationEl) {
         duration = (durationEl.textContent || '').trim();
@@ -130,7 +144,7 @@
   }
 
   /**
-   * 掃描當前 DOM 中的所有影片
+   * 掃描當前 DOM 中的所有影片 (相容公開、不公開、分享清單與最新版 YouTube 結構)
    * @param {Map<string, Object>} videoMap - 已存在的影片 Map
    * @returns {number} 本次新加入的影片數量
    */
@@ -140,7 +154,13 @@
       'ytd-playlist-video-renderer',
       'ytd-playlist-panel-video-renderer',
       'ytd-item-section-renderer ytd-playlist-video-renderer',
-      '#contents > ytd-playlist-video-renderer'
+      'ytd-rich-item-renderer ytd-video-renderer',
+      'ytd-video-renderer',
+      'ytd-grid-video-renderer',
+      'yt-lockup-view-model',
+      '#contents > ytd-playlist-video-renderer',
+      '#contents > ytd-rich-item-renderer',
+      'ytd-playlist-video-list-renderer ytd-playlist-video-renderer'
     ];
 
     const elements = document.querySelectorAll(selectors.join(', '));
