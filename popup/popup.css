@@ -446,6 +446,33 @@ body {
   background: var(--bg-hover);
 }
 
+.secondary-actions {
+  display: flex;
+  margin-top: 6px;
+}
+
+.btn-import {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed var(--border-color);
+  color: var(--text-secondary);
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.btn-import:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent-indigo);
+  color: #ffffff;
+}
+
 .btn-text-only {
   background: none;
   border: none;

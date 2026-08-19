@@ -29,6 +29,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // 主要操作與資訊
   const currentPlaylistTitle = document.getElementById('currentPlaylistTitle');
   const startAnalyzeBtn = document.getElementById('startAnalyzeBtn');
+  const importFileBtn = document.getElementById('importFileBtn');
+  const importFileInput = document.getElementById('importFileInput');
 
   // 進度條與狀態
   const progressSection = document.getElementById('progressSection');
@@ -150,6 +152,12 @@ document.addEventListener('DOMContentLoaded', () => {
     copyMarkdownBtn.addEventListener('click', copyAsMarkdown);
     exportJsonBtn.addEventListener('click', exportAsJson);
     exportCsvBtn.addEventListener('click', exportAsCsv);
+
+    // 匯入功能 (支援 JSON 與 CSV)
+    if (importFileBtn && importFileInput) {
+      importFileBtn.addEventListener('click', () => importFileInput.click());
+      importFileInput.addEventListener('change', handleFileImport);
+    }
 
     // 核心：監聽 storage 變更以達成背景即時同步
     chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -742,6 +750,227 @@ document.addEventListener('DOMContentLoaded', () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  // ==========================================
+  // 檔案匯入功能 (支援 JSON 與 CSV 格式)
+  // ==========================================
+  function handleFileImport(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target.result;
+        const fileName = file.name.toLowerCase();
+        let categorizedResults = {};
+
+        if (fileName.endsWith('.json')) {
+          categorizedResults = parseImportedJSON(text);
+        } else if (fileName.endsWith('.csv')) {
+          categorizedResults = parseImportedCSV(text);
+        } else {
+          // 嘗試先以 JSON 解析，失敗再以 CSV 解析
+          try {
+            categorizedResults = parseImportedJSON(text);
+          } catch (_) {
+            categorizedResults = parseImportedCSV(text);
+          }
+        }
+
+        const categoryNames = Object.keys(categorizedResults);
+        if (categoryNames.length === 0) {
+          throw new Error('匯入檔案內無有效之分類或影片資料');
+        }
+
+        let totalVideos = 0;
+        categoryNames.forEach(cat => {
+          totalVideos += (categorizedResults[cat] || []).length;
+        });
+
+        if (totalVideos === 0) {
+          throw new Error('匯入之分類中沒有任何影片項目');
+        }
+
+        const baseTitle = file.name.replace(/\.[^/.]+$/, '');
+        const importedTask = {
+          status: 'completed',
+          progressPercent: 100,
+          statusTitle: '檔案匯入成功',
+          statusDetail: `已從「${file.name}」匯入 ${totalVideos} 部影片 (${categoryNames.length} 個分類)`,
+          playlistUrl: currentTab?.url || '',
+          playlistTitle: `匯入清單: ${baseTitle}`,
+          totalVideos,
+          categorizedResults,
+          model: '檔案匯入 (0 Token)',
+          completedAt: Date.now()
+        };
+
+        // 更新本地快取與全域任務
+        chrome.storage.local.set({ currentTask: importedTask }, () => {
+          currentCachedTask = importedTask;
+          renderResults(importedTask);
+          showToast(`🎉 成功匯入 ${totalVideos} 部影片 (${categoryNames.length} 個分類)！可直接點擊建立清單！`);
+        });
+
+      } catch (err) {
+        console.error('File import error:', err);
+        showToast(`❌ 匯入失敗: ${err.message}`);
+      } finally {
+        event.target.value = '';
+      }
+    };
+
+    reader.onerror = () => {
+      showToast('❌ 讀取檔案失敗');
+      event.target.value = '';
+    };
+
+    reader.readAsText(file, 'UTF-8');
+  }
+
+  function parseImportedJSON(jsonString) {
+    const data = JSON.parse(jsonString);
+    const result = {};
+
+    function normalizeVideo(v, fallbackCat = '其他') {
+      const vid = v.videoId || v.id || extractVideoIdFromUrl(v.url) || '';
+      return {
+        videoId: vid,
+        title: v.title || '無標題影片',
+        channelTitle: v.channelTitle || v.channel || '未知頻道',
+        duration: v.duration || 'N/A',
+        url: v.url || (vid ? `https://www.youtube.com/watch?v=${vid}` : ''),
+        category: v.category || fallbackCat
+      };
+    }
+
+    // 格式 1: 標準匯出格式 { playlistTitle, categories: { "Cat1": [ ... ] } }
+    if (data.categories && typeof data.categories === 'object' && !Array.isArray(data.categories)) {
+      for (const [catName, vList] of Object.entries(data.categories)) {
+        if (Array.isArray(vList)) {
+          result[catName] = vList.map(v => normalizeVideo(v, catName));
+        }
+      }
+    }
+    // 格式 2: 直接是物件分類映射 { "Cat1": [ ... ], "Cat2": [ ... ] }
+    else if (typeof data === 'object' && !Array.isArray(data)) {
+      for (const [catName, vList] of Object.entries(data)) {
+        if (Array.isArray(vList)) {
+          result[catName] = vList.map(v => normalizeVideo(v, catName));
+        }
+      }
+    }
+    // 格式 3: 扁平陣列 [ { title, category, videoId, ... }, ... ]
+    else if (Array.isArray(data)) {
+      data.forEach(item => {
+        const cat = item.category || '其他';
+        if (!result[cat]) result[cat] = [];
+        result[cat].push(normalizeVideo(item, cat));
+      });
+    }
+
+    return result;
+  }
+
+  function parseImportedCSV(csvString) {
+    const lines = parseCSVRows(csvString);
+    if (!lines || lines.length < 2) {
+      throw new Error('CSV 檔案內容為空或缺少資料行');
+    }
+
+    const header = lines[0].map(h => (h || '').trim().toLowerCase());
+    let idIdx = header.findIndex(h => h.includes('id') || h.includes('編號'));
+    let titleIdx = header.findIndex(h => h.includes('title') || h.includes('標題') || h.includes('名稱'));
+    let channelIdx = header.findIndex(h => h.includes('channel') || h.includes('頻道') || h.includes('作者'));
+    let durationIdx = header.findIndex(h => h.includes('duration') || h.includes('時長') || h.includes('時間'));
+    let categoryIdx = header.findIndex(h => h.includes('category') || h.includes('分類') || h.includes('標籤'));
+    let urlIdx = header.findIndex(h => h.includes('url') || h.includes('網址') || h.includes('連結'));
+
+    // 預設位置容錯 (按照標準匯出順序: Video ID, Title, Channel, Duration, Category, URL)
+    if (idIdx === -1 && lines[0].length >= 1) idIdx = 0;
+    if (titleIdx === -1 && lines[0].length >= 2) titleIdx = 1;
+    if (channelIdx === -1 && lines[0].length >= 3) channelIdx = 2;
+    if (durationIdx === -1 && lines[0].length >= 4) durationIdx = 3;
+    if (categoryIdx === -1 && lines[0].length >= 5) categoryIdx = 4;
+    if (urlIdx === -1 && lines[0].length >= 6) urlIdx = 5;
+
+    const result = {};
+
+    for (let i = 1; i < lines.length; i++) {
+      const row = lines[i];
+      if (!row || row.length === 0 || (row.length === 1 && !row[0].trim())) continue;
+
+      const rawId = idIdx >= 0 ? (row[idIdx] || '').trim() : '';
+      const title = titleIdx >= 0 ? (row[titleIdx] || '').trim() : '無標題影片';
+      const channel = channelIdx >= 0 ? (row[channelIdx] || '').trim() : '未知頻道';
+      const duration = durationIdx >= 0 ? (row[durationIdx] || '').trim() : 'N/A';
+      const category = categoryIdx >= 0 && row[categoryIdx]?.trim() ? row[categoryIdx].trim() : '其他';
+      const url = urlIdx >= 0 ? (row[urlIdx] || '').trim() : '';
+
+      const videoId = rawId || extractVideoIdFromUrl(url) || '';
+      const finalUrl = url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : '');
+
+      if (!result[category]) {
+        result[category] = [];
+      }
+
+      result[category].push({
+        videoId,
+        title: title || '無標題影片',
+        channelTitle: channel || '未知頻道',
+        duration: duration || 'N/A',
+        url: finalUrl,
+        category
+      });
+    }
+
+    return result;
+  }
+
+  function parseCSVRows(text) {
+    let row = [''];
+    const rows = [row];
+    let insideQuote = false;
+    let i = 0;
+
+    // 移除 UTF-8 BOM
+    if (text.charCodeAt(0) === 0xFEFF) {
+      text = text.slice(1);
+    }
+
+    while (i < text.length) {
+      const char = text[i];
+      if (char === '"') {
+        if (insideQuote && text[i + 1] === '"') {
+          row[row.length - 1] += '"';
+          i += 2;
+          continue;
+        }
+        insideQuote = !insideQuote;
+      } else if (char === ',' && !insideQuote) {
+        row.push('');
+      } else if ((char === '\r' || char === '\n') && !insideQuote) {
+        if (char === '\r' && text[i + 1] === '\n') {
+          i++;
+        }
+        if (i < text.length - 1) {
+          row = [''];
+          rows.push(row);
+        }
+      } else {
+        row[row.length - 1] += char;
+      }
+      i++;
+    }
+    return rows;
+  }
+
+  function extractVideoIdFromUrl(url) {
+    if (!url) return '';
+    const match = url.match(/(?:v=|youtu\.be\/|\/embed\/|\/v\/|watch\?v=)([^#&?]+)/);
+    return match ? match[1] : '';
   }
 
   // ==========================================

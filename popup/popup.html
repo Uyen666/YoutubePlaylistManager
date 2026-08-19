@@ -140,12 +140,18 @@
         </div>
       </div>
 
-      <!-- 操作按鈕 -->
+      <!-- 操作按鈕與匯入功能 -->
       <div class="action-section">
         <button id="startAnalyzeBtn" class="btn btn-primary btn-large">
           <span class="btn-icon">🚀</span>
           <span class="btn-text">開始擷取並進行 AI 分類</span>
         </button>
+        <div class="secondary-actions">
+          <button id="importFileBtn" class="btn btn-secondary btn-import" title="匯入已分類的 JSON 或 CSV 檔案直接在 YouTube 建立清單">
+            <span>📂 匯入清單 (JSON / CSV)</span>
+          </button>
+          <input type="file" id="importFileInput" accept=".json,.csv,text/csv,application/json" class="hidden">
+        </div>
       </div>
 
       <!-- 進度與狀態提示區 -->
