@@ -447,24 +447,35 @@ body {
 }
 
 .secondary-actions {
-  display: flex;
-  margin-top: 6px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
 }
 
+.btn-quick-extract,
 .btn-import {
   width: 100%;
-  padding: 8px 12px;
-  font-size: 12px;
+  padding: 8px 6px;
+  font-size: 11px;
+  font-weight: 500;
   border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 4px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px dashed var(--border-color);
   color: var(--text-secondary);
   transition: all 0.2s;
   cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-quick-extract:hover {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: #10b981;
+  color: #10b981;
 }
 
 .btn-import:hover {

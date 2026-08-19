@@ -147,8 +147,11 @@
           <span class="btn-text">開始擷取並進行 AI 分類</span>
         </button>
         <div class="secondary-actions">
+          <button id="quickExtractBtn" class="btn btn-secondary btn-quick-extract" title="不消耗 AI Tokens，直接擷取播放清單中所有原始影片並匯出 Markdown / JSON / CSV">
+            <span>⚡ 僅擷取 (0 Token 匯出)</span>
+          </button>
           <button id="importFileBtn" class="btn btn-secondary btn-import" title="匯入已分類的 JSON 或 CSV 檔案直接在 YouTube 建立清單">
-            <span>📂 匯入清單 (JSON / CSV)</span>
+            <span>📂 匯入 (JSON / CSV)</span>
           </button>
           <input type="file" id="importFileInput" accept=".json,.csv,text/csv,application/json" class="hidden">
         </div>

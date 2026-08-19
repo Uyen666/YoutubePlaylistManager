@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 主要操作與資訊
   const currentPlaylistTitle = document.getElementById('currentPlaylistTitle');
   const startAnalyzeBtn = document.getElementById('startAnalyzeBtn');
+  const quickExtractBtn = document.getElementById('quickExtractBtn');
   const importFileBtn = document.getElementById('importFileBtn');
   const importFileInput = document.getElementById('importFileInput');
 
@@ -152,6 +153,11 @@ document.addEventListener('DOMContentLoaded', () => {
     copyMarkdownBtn.addEventListener('click', copyAsMarkdown);
     exportJsonBtn.addEventListener('click', exportAsJson);
     exportCsvBtn.addEventListener('click', exportAsCsv);
+
+    // 快速純擷取功能 (0 Token 直接匯出原始清單)
+    if (quickExtractBtn) {
+      quickExtractBtn.addEventListener('click', startQuickExtractFlow);
+    }
 
     // 匯入功能 (支援 JSON 與 CSV)
     if (importFileBtn && importFileInput) {
@@ -467,6 +473,105 @@ document.addEventListener('DOMContentLoaded', () => {
       if (statusSpinner) statusSpinner.style.display = 'none';
       progressBarFill.style.background = '#ef4444';
       startAnalyzeBtn.disabled = false;
+    }
+  }
+
+  // ==========================================
+  // 純擷取原始清單 (0 Token 消耗，直接匯出)
+  // ==========================================
+  async function startQuickExtractFlow() {
+    if (!currentTab || !isTargetPlaylist) {
+      showToast('⚠️ 請先開啟 YouTube 播放清單網頁');
+      return;
+    }
+
+    if (currentCachedTask && (currentCachedTask.status === 'scraping' || currentCachedTask.status === 'classifying')) {
+      showToast('⚠️ 任務已在背景進行中，請稍候');
+      return;
+    }
+
+    const maxItems = parseInt(maxItemsSelect.value, 10) || 0;
+
+    startAnalyzeBtn.disabled = true;
+    if (quickExtractBtn) quickExtractBtn.disabled = true;
+    resultsSection.classList.add('hidden');
+    progressSection.classList.remove('hidden');
+    if (statusSpinner) statusSpinner.style.display = 'block';
+    statusTitle.textContent = '正在擷取原始播放清單...';
+    statusDetailText.textContent = '自動滾動載入清單中所有影片 (0 Token 消耗)...';
+    progressPercent.textContent = '20%';
+    progressBarFill.style.width = '20%';
+    progressBarFill.style.background = 'linear-gradient(90deg, var(--accent-indigo), #10b981)';
+
+    try {
+      // 確保 Content Script 已注入
+      let response = null;
+      try {
+        response = await chrome.tabs.sendMessage(currentTab.id, {
+          action: 'SCRAPE_PLAYLIST',
+          maxItems
+        });
+      } catch (_) {
+        await chrome.scripting.executeScript({
+          target: { tabId: currentTab.id },
+          files: ['scripts/content.js']
+        });
+        await new Promise(r => setTimeout(r, 400));
+        response = await chrome.tabs.sendMessage(currentTab.id, {
+          action: 'SCRAPE_PLAYLIST',
+          maxItems
+        });
+      }
+
+      if (!response || !response.success || !response.videos || response.videos.length === 0) {
+        throw new Error(response?.error || '未能在目前網頁中擷取到任何影片');
+      }
+
+      const scrapedVideos = response.videos;
+      const playlistName = currentPlaylistTitle.textContent || '原始播放清單';
+
+      // 構建單一「全部影片 (未分類)」分類卡片
+      const categorizedResults = {
+        '全部影片 (未分類)': scrapedVideos.map(v => ({
+          ...v,
+          category: '全部影片 (未分類)'
+        }))
+      };
+
+      const rawTask = {
+        status: 'completed',
+        progressPercent: 100,
+        statusTitle: '擷取完成 (0 Token 消耗)',
+        statusDetail: `已成功擷取「${playlistName}」共 ${scrapedVideos.length} 部影片`,
+        playlistUrl: currentTab.url,
+        playlistTitle: playlistName,
+        totalVideos: scrapedVideos.length,
+        categorizedResults,
+        categorizedVideos: scrapedVideos,
+        model: '純擷取 (0 Token)',
+        completedAt: Date.now()
+      };
+
+      // 儲存至本地快取並渲染
+      await chrome.storage.local.set({ currentTask: rawTask });
+      currentCachedTask = rawTask;
+      progressSection.classList.add('hidden');
+      renderResults(rawTask.categorizedResults, rawTask.totalVideos, rawTask.model);
+      resultsSection.classList.remove('hidden');
+      showToast(`🎉 成功擷取 ${scrapedVideos.length} 部影片！可直接複製 Markdown、匯出 JSON 或 CSV！`);
+
+    } catch (err) {
+      console.error('[Popup] Quick extract failed:', err);
+      showToast(`❌ 擷取失敗: ${err.message}`);
+      statusTitle.textContent = '擷取失敗';
+      statusDetailText.textContent = err.message;
+      if (statusSpinner) statusSpinner.style.display = 'none';
+      progressBarFill.style.background = '#ef4444';
+    } finally {
+      if (isTargetPlaylist) {
+        startAnalyzeBtn.disabled = false;
+        if (quickExtractBtn) quickExtractBtn.disabled = false;
+      }
     }
   }
 
@@ -1026,6 +1131,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function getProviderShortName(provider, customModel) {
     const target = provider === 'custom' ? (customModel || 'Custom') : (provider || '');
+    if (target.includes('純擷取') || target.includes('擷取') || target.toLowerCase().includes('raw')) return '純擷取 (0 Token)';
     if (target.includes('匯入') || target.toLowerCase().includes('import')) return '檔案匯入';
     if (target.toLowerCase().includes('gemini')) return 'Gemini';
     if (target.toLowerCase().includes('gpt') || target.toLowerCase().includes('openai')) return 'OpenAI';
