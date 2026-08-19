@@ -636,6 +636,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!Array.isArray(catVideos) || catVideos.length === 0) return;
 
       const color = BADGE_COLORS[index % BADGE_COLORS.length];
+      const card = createCategoryCard(catName, catVideos, color, allCategoryNames);
+
       // 若指定要開啟的分類，或是僅有單一分類 (例: 純擷取/單標籤)，自動展開卡片
       if ((openCategories && openCategories.has(catName)) || sortedCategories.length === 1) {
         card.classList.add('open');
