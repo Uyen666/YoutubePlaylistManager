@@ -776,98 +776,50 @@
           }
         }
 
-        let srcMediaId = this.detectMediaId ? this.detectMediaId() : null;
-        if (!srcMediaId && userMid) {
-          try {
-            const listRes = await fetch(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${userMid}`, {
-              credentials: 'include'
-            });
-            const listData = await listRes.json();
-            if (listData.code === 0 && Array.isArray(listData.data?.list) && listData.data.list.length > 0) {
-              srcMediaId = listData.data.list[0].id;
-            }
-          } catch (_) {}
+        // 4. 直接使用穩健的 deal 接口逐一將影片寫入新收藏夾
+        async function addVideoToFolder(targetMediaId, aid, csrfToken) {
+          const params = new URLSearchParams();
+          params.append('rid', aid.toString());        // 影片 AID（純數字，不加 :2）
+          params.append('type', '2');                  // 2 代表視頻稿件
+          params.append('add_media_ids', targetMediaId.toString()); // 目標收藏夾 ID
+          params.append('del_media_ids', '');          // 不從其他清單移除
+          params.append('csrf', csrfToken);
+
+          const res = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+            },
+            body: params.toString(),
+            credentials: 'include' // 必備：自動帶上登入 Cookie
+          });
+
+          const result = await res.json();
+          console.log(`[Bilibili:DealResult] AID: ${aid} ->`, result);
+          return result;
         }
 
         let addedSuccessCount = 0;
-
-        if (srcMediaId && aids.length > 0) {
-          const copyBatchSize = 50;
-          for (let i = 0; i < aids.length; i += copyBatchSize) {
-            const chunk = aids.slice(i, i + copyBatchSize);
-            try {
-              const copyParams = new URLSearchParams();
-              copyParams.append('src_media_id', String(srcMediaId));
-              copyParams.append('tar_media_id', String(folderId));
-              if (userMid) copyParams.append('mid', String(userMid));
-              copyParams.append('resources', chunk.map(aid => `${aid}:2`).join(','));
-              copyParams.append('platform', 'web');
-              copyParams.append('csrf', csrf);
-
-              const copyRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/copy', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'Accept': 'application/json, text/plain, */*'
-                },
-                credentials: 'include',
-                body: copyParams.toString()
-              });
-
-              const copyData = await copyRes.json();
-              if (copyData.code === 0) {
-                addedSuccessCount += chunk.length;
-              }
-            } catch (_) {}
-
-            if (onProgress) {
-              onProgress(Math.min(i + copyBatchSize, aids.length), aids.length, categoryName);
+        for (let i = 0; i < aids.length; i++) {
+          const aid = aids[i];
+          try {
+            const dealRes = await addVideoToFolder(folderId, aid, csrf);
+            if (dealRes && dealRes.code === 0) {
+              addedSuccessCount++;
+            } else {
+              console.warn(`[Bilibili:Deal] (${i + 1}/${aids.length}) AID ${aid} returned code ${dealRes?.code}: ${dealRes?.message}`);
             }
-
-            if (i + copyBatchSize < aids.length) {
-              await sleep(150);
-            }
+          } catch (err) {
+            console.warn(`[Bilibili:Deal] (${i + 1}/${aids.length}) AID ${aid} error:`, err);
           }
-        }
 
-        if (addedSuccessCount < aids.length) {
-          const remainingAids = (addedSuccessCount === 0) ? aids : aids.slice(addedSuccessCount);
-          const targetAddIds = srcMediaId ? `${srcMediaId},${folderId}` : String(folderId);
-          const concurrency = 4;
-          for (let i = 0; i < remainingAids.length; i += concurrency) {
-            const chunk = remainingAids.slice(i, i + concurrency);
-            await Promise.all(chunk.map(async (singleAid) => {
-              try {
-                const dealParams = new URLSearchParams();
-                dealParams.append('rid', String(singleAid));
-                dealParams.append('type', '2');
-                dealParams.append('add_media_ids', targetAddIds);
-                dealParams.append('del_media_ids', '');
-                dealParams.append('csrf', csrf);
+          if (onProgress) {
+            onProgress(i + 1, aids.length, categoryName);
+          }
 
-                const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Accept': 'application/json, text/plain, */*'
-                  },
-                  credentials: 'include',
-                  body: dealParams.toString()
-                });
-                const singleData = await singleRes.json();
-                if (singleData.code === 0) {
-                  addedSuccessCount++;
-                }
-              } catch (_) {}
-            }));
-
-            if (onProgress) {
-              onProgress(Math.min(addedSuccessCount, aids.length), aids.length, categoryName);
-            }
-
-            if (i + concurrency < remainingAids.length) {
-              await sleep(120);
-            }
+          // 800ms 延遲防風控
+          if (i < aids.length - 1) {
+            await sleep(800);
           }
         }
 

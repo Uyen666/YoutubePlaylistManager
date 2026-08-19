@@ -1526,132 +1526,48 @@ async function nativeCreateBilibiliFavFolderInPage(categoryName, privacy, videoI
       }
     }
 
-    // 4. 透過官方 list-all API 精確獲取用戶收藏夾清單，以鎖定當前來源收藏夾 ID (srcMediaId)
-    let srcMediaId = null;
-    try {
-      if (userMid) {
-        const listRes = await fetch(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${userMid}`, {
-          credentials: 'include'
-        });
-        const listData = await listRes.json();
-        if (listData.code === 0 && Array.isArray(listData.data?.list) && listData.data.list.length > 0) {
-          const folders = listData.data.list;
+    console.log(`[Bilibili:NativeEngine] Folder created fid=${folderId}, adding ${aids.length} videos sequentially via deal API...`);
 
-          const urlFid = (window.location.href.match(/[?&]fid=(\d+)/) || [])[1];
-          const urlMl = (window.location.href.match(/\/ml(\d+)/i) || [])[1];
+    // 4. 直接使用穩健的 deal 接口逐一將影片寫入新收藏夾
+    async function addVideoToFolder(targetMediaId, aid, csrfToken) {
+      const params = new URLSearchParams();
+      params.append('rid', aid.toString());        // 影片 AID（純數字，不加 :2）
+      params.append('type', '2');                  // 2 代表視頻稿件
+      params.append('add_media_ids', targetMediaId.toString()); // 目標收藏夾 ID
+      params.append('del_media_ids', '');          // 不從其他清單移除
+      params.append('csrf', csrfToken);
 
-          const matched = folders.find(f =>
-            (urlFid && (String(f.fid) === urlFid || String(f.id) === urlFid)) ||
-            (urlMl && String(f.id) === urlMl)
-          );
+      const res = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+        },
+        body: params.toString(),
+        credentials: 'include' // 必備：自動帶上登入 Cookie
+      });
 
-          if (matched) {
-            srcMediaId = matched.id;
-          } else {
-            // 嘗試匹配頁面上的收藏夾標題，若無則預設為第一個收藏夾 (預設收藏夾)
-            const pageTitle = (document.querySelector('.fav-main-title, .fav-name, .fav-item.cur .text, .cur-list .name')?.textContent || '').trim();
-            const titleMatched = folders.find(f => f.title && pageTitle && (f.title.trim() === pageTitle || pageTitle.includes(f.title.trim())));
-            srcMediaId = titleMatched ? titleMatched.id : folders[0].id;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[Bilibili:NativeEngine] Failed fetching fav folders list:', e);
+      const result = await res.json();
+      console.log(`[Bilibili:DealResult] AID: ${aid} ->`, result);
+      return result;
     }
-
-    // 若 API 未能取得，嘗試從 DOM 探測
-    if (!srcMediaId) {
-      const url = window.location.href;
-      const fidM = url.match(/[?&]fid=(\d+)/);
-      if (fidM) srcMediaId = fidM[1];
-      const mlM = url.match(/\/ml(\d+)/i);
-      if (mlM) srcMediaId = mlM[1];
-    }
-
-    console.log(`[Bilibili:NativeEngine] Target Folder ID: ${folderId}, Source Media ID: ${srcMediaId}, User Mid: ${userMid}, Total AIDs: ${aids.length}`);
 
     let addedSuccessCount = 0;
-
-    // 4.1 優先策略：使用 B站官方收藏夾複製 API (x/v3/fav/resource/copy)
-    if (srcMediaId && aids.length > 0) {
-      const copyBatchSize = 50;
-      for (let i = 0; i < aids.length; i += copyBatchSize) {
-        const chunk = aids.slice(i, i + copyBatchSize);
-        try {
-          const copyParams = new URLSearchParams();
-          copyParams.append('src_media_id', String(srcMediaId));
-          copyParams.append('tar_media_id', String(folderId));
-          if (userMid) copyParams.append('mid', String(userMid));
-          copyParams.append('resources', chunk.map(aid => `${aid}:2`).join(','));
-          copyParams.append('platform', 'web');
-          copyParams.append('csrf', csrf);
-
-          const copyRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/copy', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'Accept': 'application/json, text/plain, */*'
-            },
-            credentials: 'include',
-            body: copyParams.toString()
-          });
-
-          const copyData = await copyRes.json();
-          console.log('[Bilibili:NativeEngine] copy response:', copyData);
-          if (copyData.code === 0) {
-            addedSuccessCount += chunk.length;
-          }
-        } catch (err) {
-          console.warn('[Bilibili:NativeEngine] copy error:', err);
+    for (let i = 0; i < aids.length; i++) {
+      const aid = aids[i];
+      try {
+        const dealRes = await addVideoToFolder(folderId, aid, csrf);
+        if (dealRes && dealRes.code === 0) {
+          addedSuccessCount++;
+        } else {
+          console.warn(`[Bilibili:Deal] (${i + 1}/${aids.length}) AID ${aid} returned code ${dealRes?.code}: ${dealRes?.message}`);
         }
-
-        if (i + copyBatchSize < aids.length) {
-          await new Promise(r => setTimeout(r, 150));
-        }
+      } catch (err) {
+        console.warn(`[Bilibili:Deal] (${i + 1}/${aids.length}) AID ${aid} error:`, err);
       }
-    }
 
-    // 4.2 備援策略：若 copy 未涵蓋所有影片，使用 deal 加入 (同時保留來源收藏夾 ID 防止 11201 報錯)
-    if (addedSuccessCount < aids.length) {
-      const remainingAids = (addedSuccessCount === 0) ? aids : aids.slice(addedSuccessCount);
-      console.log(`[Bilibili:NativeEngine] Running deal API for ${remainingAids.length} videos...`);
-      const targetAddIds = srcMediaId ? `${srcMediaId},${folderId}` : String(folderId);
-      const concurrency = 4;
-
-      for (let i = 0; i < remainingAids.length; i += concurrency) {
-        const chunk = remainingAids.slice(i, i + concurrency);
-        await Promise.all(chunk.map(async (singleAid) => {
-          try {
-            const dealParams = new URLSearchParams();
-            dealParams.append('rid', String(singleAid));
-            dealParams.append('type', '2');
-            dealParams.append('add_media_ids', targetAddIds);
-            dealParams.append('del_media_ids', '');
-            dealParams.append('csrf', csrf);
-
-            const singleRes = await fetch('https://api.bilibili.com/x/v3/fav/resource/deal', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Accept': 'application/json, text/plain, */*'
-              },
-              credentials: 'include',
-              body: dealParams.toString()
-            });
-
-            const singleData = await singleRes.json();
-            console.log(`[Bilibili:NativeEngine] deal aid=${singleAid}:`, singleData);
-            if (singleData.code === 0) {
-              addedSuccessCount++;
-            }
-          } catch (err) {
-            console.warn(`[Bilibili:NativeEngine] deal error for aid ${singleAid}:`, err);
-          }
-        }));
-
-        if (i + concurrency < remainingAids.length) {
-          await new Promise(r => setTimeout(r, 120));
-        }
+      // 800ms 延遲防風控
+      if (i < aids.length - 1) {
+        await new Promise(r => setTimeout(r, 800));
       }
     }
 
