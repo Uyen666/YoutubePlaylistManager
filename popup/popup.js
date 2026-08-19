@@ -496,33 +496,45 @@ document.addEventListener('DOMContentLoaded', () => {
   // 結果渲染 (卡片手風琴與摘要)
   // ==========================================
   function renderResults(categorizedResults, totalVideos, model) {
-    if (!categorizedResults) return;
+    let results = categorizedResults;
+    let total = totalVideos;
+    let modelName = model;
 
-    const activeCategories = Object.keys(categorizedResults).filter(cat => categorizedResults[cat] && categorizedResults[cat].length > 0);
+    // 容錯支援：如果直接傳入 task 物件
+    if (categorizedResults && typeof categorizedResults === 'object' && categorizedResults.categorizedResults) {
+      results = categorizedResults.categorizedResults;
+      total = categorizedResults.totalVideos;
+      modelName = categorizedResults.model;
+    }
+
+    if (!results || typeof results !== 'object') return;
+
+    const activeCategories = Object.keys(results).filter(cat => Array.isArray(results[cat]) && results[cat].length > 0);
     
     // 計算總影片數
     let computedTotal = 0;
-    for (const cat in categorizedResults) {
-      computedTotal += (categorizedResults[cat] || []).length;
+    for (const cat of activeCategories) {
+      computedTotal += (results[cat] || []).length;
     }
 
-    statTotalVideos.textContent = totalVideos || computedTotal;
+    const finalTotal = (typeof total === 'number' && !isNaN(total)) ? total : computedTotal;
+    statTotalVideos.textContent = finalTotal;
     statCategoryCount.textContent = activeCategories.length;
-    statModelUsed.textContent = getProviderShortName(model || providerSelect.value);
+    statModelUsed.textContent = getProviderShortName(modelName || providerSelect.value);
 
     // 清空並構建卡片 DOM
     categoriesList.innerHTML = '';
 
     // 依影片數量由多到少排序
-    const sortedCategories = Object.keys(categorizedResults).sort((a, b) => {
+    const sortedCategories = activeCategories.sort((a, b) => {
       if (a === '其他') return 1;
       if (b === '其他') return -1;
-      return (categorizedResults[b] || []).length - (categorizedResults[a] || []).length;
+      return (results[b] || []).length - (results[a] || []).length;
     });
 
     sortedCategories.forEach((catName, index) => {
-      const catVideos = categorizedResults[catName] || [];
-      if (catVideos.length === 0) return;
+      const catVideos = results[catName] || [];
+      if (!Array.isArray(catVideos) || catVideos.length === 0) return;
 
       const color = BADGE_COLORS[index % BADGE_COLORS.length];
       const card = createCategoryCard(catName, catVideos, color);
@@ -810,7 +822,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // 更新本地快取與全域任務
         chrome.storage.local.set({ currentTask: importedTask }, () => {
           currentCachedTask = importedTask;
-          renderResults(importedTask);
+          progressSection.classList.add('hidden');
+          renderResults(importedTask.categorizedResults, importedTask.totalVideos, importedTask.model);
+          resultsSection.classList.remove('hidden');
           showToast(`🎉 成功匯入 ${totalVideos} 部影片 (${categoryNames.length} 個分類)！可直接點擊建立清單！`);
         });
 
@@ -1012,9 +1026,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function getProviderShortName(provider, customModel) {
     const target = provider === 'custom' ? (customModel || 'Custom') : (provider || '');
+    if (target.includes('匯入') || target.toLowerCase().includes('import')) return '檔案匯入';
     if (target.toLowerCase().includes('gemini')) return 'Gemini';
     if (target.toLowerCase().includes('gpt') || target.toLowerCase().includes('openai')) return 'OpenAI';
-    return target;
+    return target || 'Gemini';
   }
 });
 
