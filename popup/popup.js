@@ -376,7 +376,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ==========================================
-  // LLM 分類引擎 (支援批次、指數退避與防禦性解析)
+  // LLM 分類引擎 (支援批次、指數退避與多層次容錯解析)
   // ==========================================
   async function classifyVideosWithLLM(videos, categories, provider, apiKey, onBatchProgress) {
     const BATCH_SIZE = 25; // 每批 25 部影片
@@ -405,21 +405,54 @@ document.addEventListener('DOMContentLoaded', () => {
         apiKey
       );
 
-      // 合併原始影片屬性
-      const classifiedMap = new Map();
+      console.log(`[Popup] Batch ${i + 1} Raw LLM Results:`, classifiedBatch);
+
+      // 多層次映射比對：
+      // 1. 建立 ID 映射表
+      // 2. 建立 Title 映射表
+      const classifiedMapById = new Map();
+      const classifiedMapByTitle = new Map();
+
       if (Array.isArray(classifiedBatch)) {
-        classifiedBatch.forEach(item => {
-          if (item && item.id) classifiedMap.set(item.id, item.category);
-          else if (item && item.videoId) classifiedMap.set(item.videoId, item.category);
+        classifiedBatch.forEach((item) => {
+          if (!item) return;
+          const assignedCat = findBestMatchingCategory(item.category, categories);
+          const keyId = item.id || item.videoId || item.video_id;
+          if (keyId) {
+            classifiedMapById.set(String(keyId).trim(), assignedCat);
+          }
+          if (item.title) {
+            classifiedMapByTitle.set(item.title.trim().toLowerCase(), assignedCat);
+          }
         });
       }
 
-      batchVideos.forEach(v => {
-        let assignedCat = classifiedMap.get(v.videoId) || '其他';
-        // 若模型產生的分類不在使用者定義中，歸入「其他」
-        if (!categories.includes(assignedCat)) {
+      batchVideos.forEach((v, index) => {
+        let assignedCat = null;
+
+        // 優先 1: Video ID 比對
+        if (v.videoId && classifiedMapById.has(String(v.videoId).trim())) {
+          assignedCat = classifiedMapById.get(String(v.videoId).trim());
+        }
+
+        // 優先 2: 標題完全/模糊比對
+        if (!assignedCat && v.title && classifiedMapByTitle.has(v.title.trim().toLowerCase())) {
+          assignedCat = classifiedMapByTitle.get(v.title.trim().toLowerCase());
+        }
+
+        // 優先 3: 依回傳陣列的順序 Index 映射 (防止 LLM 竄改 ID 或未回傳 ID)
+        if (!assignedCat && Array.isArray(classifiedBatch) && classifiedBatch[index]) {
+          const itemAtIdx = classifiedBatch[index];
+          if (itemAtIdx && itemAtIdx.category) {
+            assignedCat = findBestMatchingCategory(itemAtIdx.category, categories);
+          }
+        }
+
+        // 最終備援：若真的無法比對才落入「其他」
+        if (!assignedCat) {
           assignedCat = '其他';
         }
+
         results.push({
           ...v,
           category: assignedCat
@@ -457,38 +490,77 @@ document.addEventListener('DOMContentLoaded', () => {
         lastError = err;
         console.warn(`[Popup] API Attempt ${attempt + 1} failed:`, err.message);
         // 如果是 API Key 錯誤 (401, 403)，不要重試，直接拋出
-        if (err.message.includes('API_KEY_INVALID') || err.message.includes('401') || err.message.includes('403')) {
+        if (err.message.includes('API_KEY_INVALID') || err.message.includes('401') || err.message.includes('403') || err.message.includes('quota')) {
           throw err;
         }
       }
     }
 
-    console.error('[Popup] All retries exhausted. Fallback to default categories.');
-    // 容錯 Fallback：若全數重試失敗，自動將此批次所有影片歸為「其他」
+    if (lastError) {
+      throw new Error(`AI 分類失敗 (${lastError.message})，請檢查 API Key 或網路連線`);
+    }
+
     return items.map(it => ({ id: it.id, category: '其他' }));
   }
 
   /**
-   * 呼叫 Google Gemini API
+   * 智慧分類比對函式 (支援模糊比對、容錯與大小寫忽略)
+   */
+  function findBestMatchingCategory(rawCat, categories) {
+    if (!rawCat || typeof rawCat !== 'string') return '其他';
+    const cleanRaw = rawCat.trim().replace(/^[\d\.\-\s、：:•#*]+/g, '').trim();
+
+    // 1. 完全比對
+    if (categories.includes(cleanRaw)) return cleanRaw;
+
+    // 2. 忽略大小寫比對
+    const lowerRaw = cleanRaw.toLowerCase();
+    for (const cat of categories) {
+      if (cat.toLowerCase() === lowerRaw) return cat;
+    }
+
+    // 3. 包含比對 (例如 "前端程式開發" 包含 "程式開發", 或 cleanRaw 包含 category)
+    for (const cat of categories) {
+      if (cat === '其他') continue;
+      const lowerCat = cat.toLowerCase();
+      if (lowerRaw.includes(lowerCat) || lowerCat.includes(lowerRaw)) {
+        return cat;
+      }
+    }
+
+    // 4. 清除 emoji 與特殊符號後比對
+    const strippedRaw = cleanRaw.replace(/[^\w\u4e00-\u9fa5]/g, '').toLowerCase();
+    if (strippedRaw) {
+      for (const cat of categories) {
+        if (cat === '其他') continue;
+        const strippedCat = cat.replace(/[^\w\u4e00-\u9fa5]/g, '').toLowerCase();
+        if (strippedCat && (strippedRaw.includes(strippedCat) || strippedCat.includes(strippedRaw))) {
+          return cat;
+        }
+      }
+    }
+
+    return '其他';
+  }
+
+  /**
+   * 呼叫 Google Gemini API (支援 Structured Output JSON Schema)
    */
   async function callGeminiAPI(items, categories, model, apiKey) {
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
     const promptText = `
-你是一個專業的 YouTube 影片主題分類專家。
-請依據影片清單（包含標題與頻道名稱），將每部影片精準歸類至以下指定分類之一：
-【可選分類】：${categories.join(', ')}
+你是一位精準的 YouTube 影片主題分類專家。
+你的任務是仔細閱讀待分類清單中每部影片的「標題 (title)」與「頻道名稱 (channel)」，將每部影片【積極且精準】地歸類至以下指定分類標籤之一。
 
-【嚴格規則】：
-1. 每一部影片必須歸類到上述【可選分類】之一。若無法明確判斷，請填入「其他」。
-2. 請務必保持影片的 id 與原始清單完全一致。
-3. 請回傳標準 JSON 物件，格式如下：
-{
-  "results": [
-    { "id": "影片ID", "category": "分類名稱" }
-  ]
-}
-4. 嚴禁輸出任何 Markdown 代碼塊（例如 \`\`\`json）、開頭或結尾問候語。僅輸出純 JSON 字串。
+【指定可選分類標籤】：
+${categories.map(c => `• ${c}`).join('\n')}
+
+【分類重要指引】：
+1. 積極語意關聯：請深入分析影片標題中的關鍵字、主題、技術詞彙、活動類型或頻道專長，並選取最相符的分類標籤。
+2. 優先使用具體標籤：請盡最大努力歸入具體分類（例如：「程式開發」、「投資理財」、「流行音樂」等）。
+3. 「其他」使用限制：只有在影片資訊極度匱乏、標題亂碼、或完全無法與任何具體分類產生關聯時，才可選擇「其他」。請避免隨意將影片歸入「其他」。
+4. 必須嚴格使用【指定可選分類標籤】中完全一模一樣的字串名稱作為 category。
 
 【待分類影片清單】：
 ${JSON.stringify(items, null, 2)}
@@ -502,6 +574,26 @@ ${JSON.stringify(items, null, 2)}
       ],
       generationConfig: {
         responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'OBJECT',
+          properties: {
+            results: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  id: { type: 'STRING' },
+                  category: {
+                    type: 'STRING',
+                    enum: categories
+                  }
+                },
+                required: ['id', 'category']
+              }
+            }
+          },
+          required: ['results']
+        },
         temperature: 0.1
       }
     };
@@ -521,7 +613,7 @@ ${JSON.stringify(items, null, 2)}
     const data = await response.json();
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!rawText) {
-      throw new Error('Gemini API 未回傳有效內容');
+      throw new Error('Gemini API 未回傳有效內容，可能受到安全原則限制');
     }
 
     return safeParseClassificationJSON(rawText);
@@ -533,10 +625,12 @@ ${JSON.stringify(items, null, 2)}
   async function callOpenAIAPI(items, categories, model, apiKey) {
     const endpoint = 'https://api.openai.com/v1/chat/completions';
 
-    const systemPrompt = `你是一個專業的 YouTube 影片主題分類專家。
-請將每部影片精準歸類至以下指定分類之一：${categories.join(', ')}。
-若無法明確歸類請填入「其他」。
-請回傳包含 results 陣列的 JSON 物件，格式為: {"results": [{"id": "...", "category": "..."}]}`;
+    const systemPrompt = `你是一位精準的 YouTube 影片主題分類專家。
+你的任務是仔細閱讀待分類清單中每部影片的「標題 (title)」與「頻道名稱 (channel)」，將每部影片【積極且精準】地歸類至以下指定分類之一：${categories.join(', ')}。
+【分類原則】：
+1. 請積極分析影片語意與主題，優先歸入具體分類，切勿隨意使用「其他」。
+2. 只有在標題完全無意義或與所有分類毫無關聯時才填入「其他」。
+3. 必須回傳 JSON 物件，格式為: {"results": [{"id": "...", "category": "..."}]}`;
 
     const userPrompt = `待分類影片清單：\n${JSON.stringify(items, null, 2)}`;
 
@@ -575,13 +669,29 @@ ${JSON.stringify(items, null, 2)}
   }
 
   /**
-   * 安全解析 LLM 回傳的 JSON (過濾 Markdown 標記)
+   * 安全解析 LLM 回傳的 JSON (支援前後雜訊過濾與正則備援)
    */
   function safeParseClassificationJSON(raw) {
+    if (!raw || typeof raw !== 'string') return [];
     let clean = raw.trim();
-    // 清除可能包夾的 ```json ... ``` 標記
-    if (clean.startsWith('```')) {
-      clean = clean.replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim();
+
+    // 移除 markdown code block (```json ... ``` 或 ``` ...)
+    clean = clean.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+    // 如果字串中前後包含雜訊文字，嘗試擷取最外層的 { ... } 或 [ ... ]
+    const firstBrace = clean.indexOf('{');
+    const firstBracket = clean.indexOf('[');
+    
+    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+      const lastBrace = clean.lastIndexOf('}');
+      if (lastBrace !== -1 && lastBrace > firstBrace) {
+        clean = clean.substring(firstBrace, lastBrace + 1);
+      }
+    } else if (firstBracket !== -1) {
+      const lastBracket = clean.lastIndexOf(']');
+      if (lastBracket !== -1 && lastBracket > firstBracket) {
+        clean = clean.substring(firstBracket, lastBracket + 1);
+      }
     }
 
     try {
@@ -595,14 +705,29 @@ ${JSON.stringify(items, null, 2)}
       if (parsed.videos && Array.isArray(parsed.videos)) {
         return parsed.videos;
       }
-      // 搜尋任何 Array 屬性
+      if (parsed.items && Array.isArray(parsed.items)) {
+        return parsed.items;
+      }
+      if (parsed.data && Array.isArray(parsed.data)) {
+        return parsed.data;
+      }
+      // 搜尋物件中任何 Array 屬性
       for (const key in parsed) {
         if (Array.isArray(parsed[key])) return parsed[key];
       }
       return [];
     } catch (err) {
-      console.warn('JSON 解析異常，嘗試正則抓取:', err, clean);
-      return [];
+      console.warn('JSON 解析異常，嘗試正則擷取:', err, clean);
+      const matches = [];
+      const regex = /\{[^{}]*"category"\s*:\s*"([^"]+)"[^{}]*\}/g;
+      let match;
+      while ((match = regex.exec(clean)) !== null) {
+        try {
+          const item = JSON.parse(match[0]);
+          matches.push(item);
+        } catch (_) {}
+      }
+      return matches;
     }
   }
 
