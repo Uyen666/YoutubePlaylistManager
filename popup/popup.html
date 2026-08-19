@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube 播放清單 AI 分類器</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header 頂部導覽列 -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3" fill="#ff0033" stroke="#ff0033"></polygon>
+            <path d="M16 4l2 4 4 2-4 2-2 4-2-4-4-2 4-2 2-4z" fill="#ffd700" stroke="#ffd700" transform="scale(0.55) translate(14, -2)"></path>
+          </svg>
+        </div>
+        <div class="brand-info">
+          <h1>YouTube 清單分類器</h1>
+          <span class="version-tag">AI Powered</span>
+        </div>
+      </div>
+      <button id="toggleSettingsBtn" class="icon-btn" title="偏好設定" aria-label="設定">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+    </header>
+
+    <!-- 非播放清單提示橫幅 -->
+    <div id="pageAlert" class="alert-banner hidden">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-content">
+        <p class="alert-title">非 YouTube 播放清單頁面</p>
+        <p class="alert-desc">請前往 YouTube 播放清單網頁（網址包含 <code>/playlist?list=...</code> 或正在播放的清單）後再使用本功能。</p>
+      </div>
+    </div>
+
+    <!-- 設定面板 (可折疊) -->
+    <section id="settingsPanel" class="settings-card hidden">
+      <div class="section-title">
+        <span>⚙️ API 與分類偏好設定</span>
+      </div>
+
+      <!-- 模型選擇 -->
+      <div class="form-group">
+        <label for="providerSelect">AI 模型供應商：</label>
+        <select id="providerSelect" class="form-control">
+          <optgroup label="Google Gemini (推薦)">
+            <option value="gemini-2.0-flash">Gemini 2.0 Flash (高速極致推薦)</option>
+            <option value="gemini-1.5-flash">Gemini 1.5 Flash (穩定高性價)</option>
+          </optgroup>
+          <optgroup label="OpenAI">
+            <option value="gpt-4o-mini">GPT-4o mini (快速輕量)</option>
+            <option value="gpt-4o">GPT-4o (旗艦精準)</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <!-- API Key 輸入 -->
+      <div class="form-group">
+        <div class="label-row">
+          <label for="apiKeyInput">API Key：</label>
+          <a id="apiKeyHelpLink" href="https://aistudio.google.com/app/apikey" target="_blank" class="help-link">取得免費 Key ↗</a>
+        </div>
+        <div class="password-input-wrapper">
+          <input type="password" id="apiKeyInput" class="form-control" placeholder="請貼上您的 API Key" autocomplete="off" spellcheck="false">
+          <button id="toggleKeyVisibilityBtn" class="visibility-btn" type="button" title="顯示/隱藏金鑰">
+            <span id="eyeIcon">👁️</span>
+          </button>
+        </div>
+        <span class="form-tip">🔒 API 金鑰僅保存在本機瀏覽器 <code>chrome.storage.local</code> 中。</span>
+      </div>
+
+      <!-- 自訂分類標籤 -->
+      <div class="form-group">
+        <div class="label-row">
+          <label for="categoriesInput">自訂分類標籤：</label>
+          <span class="char-count">逗號分隔</span>
+        </div>
+        <textarea id="categoriesInput" class="form-control text-area" rows="3" placeholder="程式開發, 投資理財, 流行音樂, 遊戲動漫, 生活雜談, 其他"></textarea>
+        <div class="preset-buttons">
+          <span class="preset-label">快速預設：</span>
+          <button type="button" class="preset-btn" data-tags="程式開發, 投資理財, 流行音樂, 遊戲動漫, 生活雜談, 其他">通用預設</button>
+          <button type="button" class="preset-btn" data-tags="前端技術, 後端架構, AI人工智慧, DevOps運維, 軟體工程, 其他">軟體開發</button>
+          <button type="button" class="preset-btn" data-tags="總體經濟, 股票投資, 加密貨幣, 房產理財, 商業思維, 其他">財經投資</button>
+        </div>
+      </div>
+
+      <!-- 最大擷取影片數量 -->
+      <div class="form-group">
+        <label for="maxItemsSelect">擷取影片上限：</label>
+        <select id="maxItemsSelect" class="form-control">
+          <option value="50">50 部 (快速體驗)</option>
+          <option value="100" selected>100 部 (推薦預設)</option>
+          <option value="200">200 部 (深度清單)</option>
+          <option value="0">全部載入 (完整播放清單)</option>
+        </select>
+      </div>
+
+      <!-- 儲存按鈕 -->
+      <div class="form-actions">
+        <button id="saveSettingsBtn" class="btn btn-secondary">💾 儲存設定</button>
+        <span id="saveStatus" class="save-status hidden">已儲存 ✔️</span>
+      </div>
+    </section>
+
+    <!-- 主要操作區塊 -->
+    <main class="main-content">
+      <!-- 播放清單資訊卡片 -->
+      <div id="playlistInfoCard" class="info-card">
+        <div class="info-icon">📋</div>
+        <div class="info-meta">
+          <div class="info-label">目標播放清單</div>
+          <div id="currentPlaylistTitle" class="info-title">偵測中...</div>
+        </div>
+      </div>
+
+      <!-- 操作按鈕 -->
+      <div class="action-section">
+        <button id="startAnalyzeBtn" class="btn btn-primary btn-large">
+          <span class="btn-icon">🚀</span>
+          <span class="btn-text">開始擷取並進行 AI 分類</span>
+        </button>
+      </div>
+
+      <!-- 進度與狀態提示區 -->
+      <section id="progressSection" class="progress-section hidden">
+        <div class="progress-header">
+          <span id="statusTitle" class="status-title">處理中...</span>
+          <span id="progressPercent" class="progress-percent">0%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div id="progressBarFill" class="progress-bar-fill"></div>
+        </div>
+        <div class="status-detail">
+          <div class="spinner"></div>
+          <span id="statusDetailText">正在初始化...</span>
+        </div>
+      </section>
+
+      <!-- 結果展示區塊 -->
+      <section id="resultsSection" class="results-section hidden">
+        <div class="results-summary">
+          <div class="stat-pill">
+            <span class="stat-num" id="statTotalVideos">0</span>
+            <span class="stat-label">部影片</span>
+          </div>
+          <div class="stat-pill">
+            <span class="stat-num" id="statCategoryCount">0</span>
+            <span class="stat-label">個分類</span>
+          </div>
+          <div class="stat-pill">
+            <span class="stat-num" id="statModelUsed">Gemini</span>
+            <span class="stat-label">分類引擎</span>
+          </div>
+        </div>
+
+        <div class="results-toolbar">
+          <span class="results-header-text">📂 分類結果 (點擊展開/收合)</span>
+          <button id="toggleAllAccordionBtn" class="btn-text-only">全部展開</button>
+        </div>
+
+        <!-- 分類卡片清單 (動態生成) -->
+        <div id="categoriesList" class="categories-container">
+          <!-- 卡片動態插入 -->
+        </div>
+
+        <!-- 匯出工具列 (Sticky) -->
+        <div class="export-actions">
+          <button id="copyMarkdownBtn" class="btn btn-export">
+            <span>📋 複製 Markdown</span>
+          </button>
+          <button id="exportJsonBtn" class="btn btn-export">
+            <span>💾 匯出 JSON</span>
+          </button>
+          <button id="exportCsvBtn" class="btn btn-export">
+            <span>📊 匯出 CSV</span>
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <!-- Toast 提示訊息 -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

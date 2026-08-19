@@ -1,0 +1,50 @@
+# Environment Variables & Secrets (API Keys, Credentials)
+.env
+.env.local
+.env.*.local
+*.env
+api_key.txt
+keys.json
+credentials.json
+config.local.json
+secrets/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE & Editor Folders
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.bak
+*~
+
+# Dependencies & Build Outputs
+node_modules/
+dist/
+build/
+coverage/
+.temp/
+.tmp/
+tmp/
+temp/
+scratch/
