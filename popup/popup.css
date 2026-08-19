@@ -679,9 +679,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 280px;
+  max-height: 380px;
   overflow-y: auto;
-  padding-right: 2px;
+  padding-right: 4px;
+  overscroll-behavior: contain;
 }
 
 /* 分類卡片 */
@@ -691,6 +692,7 @@ body {
   border-radius: var(--radius-md);
   overflow: hidden;
   transition: border-color 0.2s;
+  flex-shrink: 0;
 }
 
 .category-card:hover {
@@ -706,6 +708,9 @@ body {
   user-select: none;
   background: rgba(255, 255, 255, 0.02);
   transition: background 0.2s;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .category-header:hover {
@@ -798,10 +803,14 @@ body {
 
 .category-body {
   display: none;
-  padding: 6px 12px 10px 12px;
+  padding: 6px 10px 10px 10px;
   border-top: 1px solid var(--border-light);
   flex-direction: column;
   gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .category-card.open .category-body {
