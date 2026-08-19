@@ -297,16 +297,16 @@ if (chrome.notifications && chrome.notifications.onClicked) {
 // LLM 分類引擎 (支援批次、指數退避與多層次容錯解析)
 // ==========================================
 async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchProgress) {
-  const BATCH_SIZE = 25; // 每批 25 部影片
+  const BATCH_SIZE = 50; // 每批 50 部影片 (大幅減少請求次數，徹底避免觸發 Google 每分鐘 20 次限制)
   const totalBatches = Math.ceil(videos.length / BATCH_SIZE);
   const results = [];
 
   for (let i = 0; i < totalBatches; i++) {
     if (currentCancelToken) throw new Error('任務已被使用者取消');
 
-    // 批次間隔 1.2 秒保護，避免瞬間觸發 Google 每分鐘 15 次請求 (15 RPM) 的短時間頻率限制
+    // 批次間隔 1.5 秒保護
     if (i > 0) {
-      await new Promise(r => setTimeout(r, 1200));
+      await new Promise(r => setTimeout(r, 1500));
     }
 
     const batchStart = i * BATCH_SIZE;
@@ -387,9 +387,9 @@ async function classifyVideosWithLLM(videos, categories, model, apiKey, onBatchP
 }
 
 /**
- * 具備指數退避重試的單一批次分類函式 (支援 429 頻率限制自動等待冷卻)
+ * 具備智慧解析與指數退避重試的單一批次分類函式
  */
-async function classifySingleBatchWithRetry(items, categories, model, apiKey, maxRetries = 4) {
+async function classifySingleBatchWithRetry(items, categories, model, apiKey, maxRetries = 5) {
   let lastError = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -397,12 +397,24 @@ async function classifySingleBatchWithRetry(items, categories, model, apiKey, ma
 
     try {
       if (attempt > 0) {
-        // 如果是 429 速率限制，延長等待時間 5s, 10s, 20s
-        const isRateLimit = lastError && (lastError.message.includes('429') || lastError.message.includes('quota') || lastError.message.includes('RESOURCE_EXHAUSTED'));
-        const baseDelay = isRateLimit ? 5000 : 1000;
-        const delayMs = Math.pow(2, attempt) * baseDelay + Math.random() * 1000;
-        console.warn(`[YT-AI-Classifier:Background] Retrying API request (Attempt ${attempt}/${maxRetries}) after ${Math.round(delayMs)}ms...`);
-        await new Promise(r => setTimeout(r, delayMs));
+        let waitMs = Math.pow(2, attempt) * 2000;
+
+        // 智慧解析 Google 回傳的精準重試秒數 (例: "Please retry in 13.33s")
+        if (lastError && lastError.message) {
+          const retryMatch = lastError.message.match(/Please retry in ([\d\.]+)s/i) ||
+                             lastError.message.match(/retry after ([\d\.]+)s/i);
+          if (retryMatch && retryMatch[1]) {
+            const parsedSeconds = parseFloat(retryMatch[1]);
+            if (!isNaN(parsedSeconds)) {
+              waitMs = Math.ceil(parsedSeconds * 1000) + 1500; // 加上 1.5 秒緩衝
+            }
+          } else if (lastError.message.includes('429') || lastError.message.includes('quota') || lastError.message.includes('RESOURCE_EXHAUSTED')) {
+            waitMs = Math.max(waitMs, 10000); // 至少等待 10 秒
+          }
+        }
+
+        console.warn(`[YT-AI-Classifier:Background] Cooling down for ${(waitMs / 1000).toFixed(1)}s (Attempt ${attempt}/${maxRetries}) due to Google rate limit...`);
+        await new Promise(r => setTimeout(r, waitMs));
       }
 
       const isGemini = model.toLowerCase().includes('gemini');
@@ -414,7 +426,7 @@ async function classifySingleBatchWithRetry(items, categories, model, apiKey, ma
     } catch (err) {
       lastError = err;
       console.warn(`[YT-AI-Classifier:Background] API Attempt ${attempt + 1} failed:`, err.message);
-      // 只有在 API Key 真正無效或模型不存在時才直接拋出；429 Rate Limit 會自動進行指數退避等待重試！
+      // 真正不可重試的錯誤 (API Key 錯誤、模型被停用等)
       if (err.message.includes('API_KEY_INVALID') || err.message.includes('401') || err.message.includes('403') || err.message.includes('no longer available')) {
         throw err;
       }
